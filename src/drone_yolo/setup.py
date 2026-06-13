@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-package_name = 'drone_fake'
+package_name = 'drone_yolo'
 
 setup(
     name=package_name,
@@ -19,7 +19,7 @@ setup(
     license='Apache-2.0',
     entry_points={
         'console_scripts': [
-            'yolo_node = drone_fake.yolo_node:main',
+            'yolo_node = drone_yolo.yolo_node:main',
         ],
     },
 )

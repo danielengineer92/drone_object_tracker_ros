@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-package_name = 'drone_bringup'
+package_name = 'drone_control'
 
 setup(
     name=package_name,
@@ -19,7 +19,7 @@ setup(
     license='Apache-2.0',
     entry_points={
         'console_scripts': [
-            'control_node = drone_bringup.control_node:main',
+            'control_node = drone_control.control_node:main',
         ],
     },
 )
