@@ -1,0 +1,73 @@
+# Parameters for full system mode (real camera + real drone)
+
+camera_node:
+  ros__parameters:
+    camera_index: 0
+    frame_width: 640
+    frame_height: 480
+    fps: 30.0
+    reconnect_interval: 3.0
+    max_reconnect_attempts: 10
+    camera_backend: "v4l2"
+
+yolo_node:
+  ros__parameters:
+    model_path: "yolov8n.pt"
+    confidence_threshold: 0.5
+    iou_threshold: 0.45
+    device: "cpu"
+    input_size: 640
+    max_detections: 20
+    half_precision: false
+    verbose: false
+
+tracker_node:
+  ros__parameters:
+    target_class: "person"
+    min_confidence: 0.5
+    detection_timeout: 1.5
+    reacquisition_timeout: 4.0
+    smoothing_alpha: 0.35
+    target_area_min: 0.002
+    target_area_max: 0.7
+    publish_rate: 30.0
+    proximity_threshold: 0.12
+
+telemetry_node:
+  ros__parameters:
+    connection_url: "serial:///dev/ttyACM0:57600"
+    publish_rate: 10.0
+    reconnect_interval: 5.0
+    connection_timeout: 10.0
+
+control_node:
+  ros__parameters:
+    autonomous_enabled: false
+    gain_forward: 0.8
+    gain_right: 0.7
+    gain_down: 0.4
+    gain_yaw: 0.5
+    deadband_x: 0.06
+    deadband_y: 0.06
+    max_velocity_forward: 1.5
+    max_velocity_right: 1.5
+    max_velocity_down: 0.8
+    max_yaw_rate: 0.8
+    rate_limit: 0.25
+    min_battery_percent: 25.0
+    require_gps: true
+    require_armed: true
+    control_rate: 20.0
+    target_timeout: 2.0
+
+visualizer_node:
+  ros__parameters:
+    window_name: "Drone Vision System (FULL SYSTEM)"
+    display_width: 960
+    display_height: 720
+    show_detections: true
+    show_tracking: true
+    show_telemetry: true
+    show_control: true
+    display_fps: 30.0
+    headless: false

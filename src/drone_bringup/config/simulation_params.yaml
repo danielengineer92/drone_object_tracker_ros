@@ -1,0 +1,86 @@
+# Parameters for simulation mode (no hardware required)
+
+fake_camera_node:
+  ros__parameters:
+    frame_width: 640
+    frame_height: 480
+    fps: 30.0
+    target_type: "person_like"
+    motion_pattern: "sinusoidal"
+    motion_speed: 0.8
+    add_noise: true
+    noise_level: 8
+
+fake_detection_node:
+  ros__parameters:
+    publish_rate: 15.0
+    target_class: "person"
+    target_class_id: 0
+    base_confidence: 0.82
+    confidence_noise: 0.08
+    motion_pattern: "sinusoidal"
+    motion_speed: 0.8
+    image_width: 640
+    image_height: 480
+    detection_dropout_rate: 0.05
+    add_false_detections: true
+    false_detection_rate: 0.08
+
+fake_telemetry_node:
+  ros__parameters:
+    publish_rate: 10.0
+    simulate_armed: false
+    simulate_flying: false
+    initial_battery_percent: 78.0
+    battery_drain_rate: 0.005
+    base_latitude: 47.3769
+    base_longitude: 8.5417
+    base_altitude: 408.0
+    flight_altitude: 0.0
+    flight_mode: "MANUAL"
+    gps_satellites: 14
+    simulate_gps_noise: true
+
+tracker_node:
+  ros__parameters:
+    target_class: "person"
+    min_confidence: 0.4
+    detection_timeout: 2.0
+    reacquisition_timeout: 5.0
+    smoothing_alpha: 0.4
+    target_area_min: 0.001
+    target_area_max: 0.8
+    publish_rate: 30.0
+    proximity_threshold: 0.15
+
+control_node:
+  ros__parameters:
+    autonomous_enabled: false
+    gain_forward: 1.0
+    gain_right: 0.8
+    gain_down: 0.5
+    gain_yaw: 0.6
+    deadband_x: 0.05
+    deadband_y: 0.05
+    max_velocity_forward: 2.0
+    max_velocity_right: 2.0
+    max_velocity_down: 1.0
+    max_yaw_rate: 1.0
+    rate_limit: 0.3
+    min_battery_percent: 20.0
+    require_gps: false
+    require_armed: false
+    control_rate: 20.0
+    target_timeout: 3.0
+
+visualizer_node:
+  ros__parameters:
+    window_name: "Drone Vision System (SIMULATION)"
+    display_width: 960
+    display_height: 720
+    show_detections: true
+    show_tracking: true
+    show_telemetry: true
+    show_control: true
+    display_fps: 30.0
+    headless: false
