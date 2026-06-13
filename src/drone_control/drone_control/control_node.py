@@ -8,6 +8,7 @@ never sent to the aircraft.
 """
 
 import time
+from rcl_interfaces.msg import SetParametersResult
 from typing import Optional
 
 import rclpy
@@ -136,7 +137,7 @@ class ControlNode(Node):
                 'no flight commands will be sent.'
             )
 
-    def _on_parameter_change(self, params) -> rclpy.parameter.SetParametersResult:
+    def _on_parameter_change(self, params) -> SetParametersResult:
         """Handle parameter changes at runtime."""
         for param in params:
             if param.name == 'autonomous_enabled':
@@ -163,7 +164,7 @@ class ControlNode(Node):
             elif param.name == 'deadband_y':
                 self._deadband_y = param.value
 
-        return rclpy.parameter.SetParametersResult(successful=True)
+        return SetParametersResult(successful=True)
 
     def _target_error_callback(self, msg: TargetError) -> None:
         """Store the latest target error."""
