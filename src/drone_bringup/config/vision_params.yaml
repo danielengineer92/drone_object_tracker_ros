@@ -5,7 +5,7 @@ camera_node:
     camera_index: 0
     frame_width: 640
     frame_height: 480
-    fps: 30.0
+    fps: 30
     reconnect_interval: 3.0
     max_reconnect_attempts: 10
     camera_backend: "v4l2"
@@ -20,6 +20,7 @@ yolo_node:
     max_detections: 20
     half_precision: false
     verbose: false
+    target_class: "person"
 
 tracker_node:
   ros__parameters:
@@ -35,23 +36,59 @@ tracker_node:
 
 control_node:
   ros__parameters:
+    # ============================================================
+    # SAFETY — leave autonomous_enabled FALSE until bench-tested
+    # ============================================================
     autonomous_enabled: false
-    gain_forward: 1.0
-    gain_right: 0.8
-    gain_down: 0.5
-    gain_yaw: 0.6
+
+    # ============================================================
+    # Control gains (proportional)
+    # error is normalized image coords in [-1, 1] after deadband
+    # ============================================================
+    gain_yaw: 0.8        # rad/s per unit error_x   -> turn toward target
+    gain_down: 0.3       # m/s   per unit error_y   -> descend if target low in frame
+    gain_forward: 1.0    # unused until area-based forward control is added
+    gain_right: 1.0      # unused in yaw-only lateral mode
+
+    # ============================================================
+    # Deadband — ignore tiny errors near image center
+    # Must be in [0, 1). 0.05 ≈ ±5% of half-frame.
+    # ============================================================
     deadband_x: 0.05
     deadband_y: 0.05
-    max_velocity_forward: 2.0
-    max_velocity_right: 2.0
-    max_velocity_down: 1.0
-    max_yaw_rate: 1.0
-    rate_limit: 0.3
-    min_battery_percent: 20.0
-    require_gps: false
-    require_armed: false
-    control_rate: 20.0
-    target_timeout: 3.0
+
+    # ============================================================
+    # Velocity / yaw-rate clamps (hard caps on output)
+    # ============================================================
+    max_velocity_forward: 2.0   # m/s
+    max_velocity_right: 2.0     # m/s   (effectively unused; strafe held at 0)
+    max_velocity_down: 0.5      # m/s   keep small — this is descent rate
+    max_yaw_rate: 1.0           # rad/s ~57 deg/s
+
+    # ============================================================
+    # Acceleration limits (physical units, scaled by control period)
+    # These set how fast the commanded velocity can CHANGE.
+    # Lower = smoother but laggier; higher = snappier but jerkier.
+    # ============================================================
+    max_accel_forward: 1.5      # m/s^2
+    max_accel_right: 1.5        # m/s^2
+    max_accel_down: 0.5         # m/s^2  conservative for descent
+    max_yaw_accel: 2.0          # rad/s^2
+
+    # ============================================================
+    # Safety gates
+    # ============================================================
+    min_battery_percent: 25.0   # block commands below this
+    require_gps: false          # set true for outdoor flight
+    require_armed: true         # block commands until pilot arms
+    min_altitude_m: 2.0         # altitude floor — blocks further descent
+
+    # ============================================================
+    # Timing
+    # ============================================================
+    control_rate: 20.0          # Hz   (control loop frequency)
+    target_timeout: 1.0         # s    target_error stale after this
+    telemetry_timeout: 2.0      # s    telemetry stale after this
 
 fake_telemetry_node:
   ros__parameters:

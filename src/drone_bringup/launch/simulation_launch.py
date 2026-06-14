@@ -1,8 +1,8 @@
 """
 Launch file for simulation mode.
 
-Launches fake camera, fake detections, fake telemetry, tracker, control, and visualizer.
-No hardware required. Useful for development and testing.
+Launches fake camera, fake detections, fake telemetry, tracker, control,
+and visualizer. No hardware required. Useful for development and testing.
 """
 
 import os
@@ -16,6 +16,7 @@ from launch_ros.actions import Node
 
 def generate_launch_description() -> LaunchDescription:
     """Generate the simulation launch description."""
+
     # Get config file path
     bringup_dir = get_package_share_directory('drone_bringup')
     config_file = os.path.join(bringup_dir, 'config', 'simulation_params.yaml')
@@ -39,6 +40,9 @@ def generate_launch_description() -> LaunchDescription:
         executable='fake_camera_node',
         name='fake_camera_node',
         parameters=[config_file],
+        remappings=[
+            ('image_raw', '/camera/image_raw'),
+        ],
         output='screen',
     )
 
@@ -46,7 +50,10 @@ def generate_launch_description() -> LaunchDescription:
         package='drone_fake',
         executable='fake_detection_node',
         name='fake_detection_node',
-        parameters=[config_file],
+        parameters=[config_file, {'target_class': LaunchConfiguration('target_class')}],
+        remappings=[
+            ('detections', '/detections'),
+        ],
         output='screen',
     )
 
@@ -55,6 +62,9 @@ def generate_launch_description() -> LaunchDescription:
         executable='fake_telemetry_node',
         name='fake_telemetry_node',
         parameters=[config_file],
+        remappings=[
+            ('drone/telemetry', '/drone/telemetry'),
+        ],
         output='screen',
     )
 
@@ -62,7 +72,11 @@ def generate_launch_description() -> LaunchDescription:
         package='drone_tracker',
         executable='tracker_node',
         name='tracker_node',
-        parameters=[config_file],
+        parameters=[config_file, {'target_class': LaunchConfiguration('target_class')}],
+        remappings=[
+            ('detections',   '/detections'),
+            ('target_error', '/target_error'),
+        ],
         output='screen',
     )
 
@@ -71,7 +85,13 @@ def generate_launch_description() -> LaunchDescription:
         executable='control_node',
         name='control_node',
         parameters=[config_file],
+        remappings=[
+            ('target_error',    '/target_error'),
+            ('drone/telemetry', '/drone/telemetry'),
+            ('control_command', '/control_command'),
+        ],
         output='screen',
+        emulate_tty=True,
     )
 
     visualizer = Node(
@@ -79,6 +99,13 @@ def generate_launch_description() -> LaunchDescription:
         executable='visualizer_node',
         name='visualizer_node',
         parameters=[config_file, {'headless': LaunchConfiguration('headless')}],
+        remappings=[
+            ('image_raw',       '/camera/image_raw'),
+            ('detections',      '/detections'),
+            ('target_error',    '/target_error'),
+            ('drone/telemetry', '/drone/telemetry'),
+            ('control_command', '/control_command'),
+        ],
         output='screen',
     )
 
@@ -87,7 +114,7 @@ def generate_launch_description() -> LaunchDescription:
         target_class_arg,
         LogInfo(msg='=== DRONE VISION SYSTEM - SIMULATION MODE ==='),
         LogInfo(msg='No hardware required. All data is simulated.'),
-        LogInfo(msg='autonomous_enabled is FALSE - no flight commands will be sent.'),
+        LogInfo(msg='autonomous_enabled is TRUE in simulation only; no real drone is connected.'),
         fake_camera,
         fake_detection,
         fake_telemetry,

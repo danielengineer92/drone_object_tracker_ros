@@ -51,6 +51,9 @@ def generate_launch_description() -> LaunchDescription:
         executable='camera_node',
         name='camera_node',
         parameters=[config_file, {'camera_index': LaunchConfiguration('camera_index')}],
+        remappings=[
+            ('image_raw', '/camera/image_raw'),
+        ],
         output='screen',
     )
 
@@ -58,7 +61,17 @@ def generate_launch_description() -> LaunchDescription:
         package='drone_yolo',
         executable='yolo_node',
         name='yolo_node',
-        parameters=[config_file, {'model_path': LaunchConfiguration('model_path')}],
+        parameters=[
+            config_file,
+            {
+                'model_path': LaunchConfiguration('model_path'),
+                'target_class': LaunchConfiguration('target_class'),
+            },
+        ],
+        remappings=[
+            ('image_raw',  '/camera/image_raw'),
+            ('detections', '/detections'),
+        ],
         output='screen',
     )
 
@@ -67,6 +80,10 @@ def generate_launch_description() -> LaunchDescription:
         executable='tracker_node',
         name='tracker_node',
         parameters=[config_file, {'target_class': LaunchConfiguration('target_class')}],
+        remappings=[
+            ('detections',   '/detections'),
+            ('target_error', '/target_error'),
+        ],
         output='screen',
     )
 
@@ -75,7 +92,13 @@ def generate_launch_description() -> LaunchDescription:
         executable='control_node',
         name='control_node',
         parameters=[config_file],
+        remappings=[
+            ('target_error',    '/target_error'),
+            ('drone/telemetry', '/drone/telemetry'),
+            ('control_command', '/control_command'),
+        ],
         output='screen',
+        emulate_tty=True,
     )
 
     # Use fake telemetry since no drone is connected
@@ -84,6 +107,9 @@ def generate_launch_description() -> LaunchDescription:
         executable='fake_telemetry_node',
         name='fake_telemetry_node',
         parameters=[config_file],
+        remappings=[
+            ('drone/telemetry', '/drone/telemetry'),
+        ],
         output='screen',
     )
 
@@ -92,6 +118,13 @@ def generate_launch_description() -> LaunchDescription:
         executable='visualizer_node',
         name='visualizer_node',
         parameters=[config_file, {'headless': LaunchConfiguration('headless')}],
+        remappings=[
+            ('image_raw',       '/camera/image_raw'),
+            ('detections',      '/detections'),
+            ('target_error',    '/target_error'),
+            ('drone/telemetry', '/drone/telemetry'),
+            ('control_command', '/control_command'),
+        ],
         output='screen',
     )
 

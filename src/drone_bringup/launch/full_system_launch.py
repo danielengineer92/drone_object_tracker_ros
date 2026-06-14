@@ -1,8 +1,8 @@
 """
 Launch file for full system mode.
 
-Launches real camera, YOLO detection, tracker, control, real telemetry, and visualizer.
-Requires camera and PX4 drone connection.
+Launches real camera, YOLO detection, tracker, control, real telemetry,
+and visualizer. Requires camera and PX4 drone connection.
 
 WARNING: autonomous_enabled defaults to False. Commands are logged only.
 """
@@ -18,6 +18,7 @@ from launch_ros.actions import Node
 
 def generate_launch_description() -> LaunchDescription:
     """Generate the full system launch description."""
+
     # Get config file path
     bringup_dir = get_package_share_directory('drone_bringup')
     config_file = os.path.join(bringup_dir, 'config', 'full_system_params.yaml')
@@ -59,6 +60,9 @@ def generate_launch_description() -> LaunchDescription:
         executable='camera_node',
         name='camera_node',
         parameters=[config_file, {'camera_index': LaunchConfiguration('camera_index')}],
+        remappings=[
+            ('image_raw', '/camera/image_raw'),
+        ],
         output='screen',
     )
 
@@ -66,7 +70,17 @@ def generate_launch_description() -> LaunchDescription:
         package='drone_yolo',
         executable='yolo_node',
         name='yolo_node',
-        parameters=[config_file, {'model_path': LaunchConfiguration('model_path')}],
+        parameters=[
+            config_file,
+            {
+                'model_path': LaunchConfiguration('model_path'),
+                'target_class': LaunchConfiguration('target_class'),
+            },
+        ],
+        remappings=[
+            ('image_raw',  '/camera/image_raw'),
+            ('detections', '/detections'),
+        ],
         output='screen',
     )
 
@@ -75,6 +89,10 @@ def generate_launch_description() -> LaunchDescription:
         executable='tracker_node',
         name='tracker_node',
         parameters=[config_file, {'target_class': LaunchConfiguration('target_class')}],
+        remappings=[
+            ('detections',   '/detections'),
+            ('target_error', '/target_error'),
+        ],
         output='screen',
     )
 
@@ -83,6 +101,9 @@ def generate_launch_description() -> LaunchDescription:
         executable='telemetry_node',
         name='telemetry_node',
         parameters=[config_file, {'connection_url': LaunchConfiguration('connection_url')}],
+        remappings=[
+            ('drone/telemetry', '/drone/telemetry'),
+        ],
         output='screen',
     )
 
@@ -91,7 +112,13 @@ def generate_launch_description() -> LaunchDescription:
         executable='control_node',
         name='control_node',
         parameters=[config_file],
+        remappings=[
+            ('target_error',    '/target_error'),
+            ('drone/telemetry', '/drone/telemetry'),
+            ('control_command', '/control_command'),
+        ],
         output='screen',
+        emulate_tty=True,
     )
 
     visualizer = Node(
@@ -99,6 +126,13 @@ def generate_launch_description() -> LaunchDescription:
         executable='visualizer_node',
         name='visualizer_node',
         parameters=[config_file, {'headless': LaunchConfiguration('headless')}],
+        remappings=[
+            ('image_raw',       '/camera/image_raw'),
+            ('detections',      '/detections'),
+            ('target_error',    '/target_error'),
+            ('drone/telemetry', '/drone/telemetry'),
+            ('control_command', '/control_command'),
+        ],
         output='screen',
     )
 

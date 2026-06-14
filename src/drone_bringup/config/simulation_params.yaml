@@ -55,23 +55,34 @@ tracker_node:
 
 control_node:
   ros__parameters:
-    autonomous_enabled: false
+    autonomous_enabled: true     # safe to enable in sim
+
+    gain_yaw: 1.0
+    gain_down: 0.4
     gain_forward: 1.0
-    gain_right: 0.8
-    gain_down: 0.5
-    gain_yaw: 0.6
-    deadband_x: 0.05
-    deadband_y: 0.05
-    max_velocity_forward: 2.0
-    max_velocity_right: 2.0
+    gain_right: 1.0
+
+    deadband_x: 0.03
+    deadband_y: 0.03
+
+    max_velocity_forward: 3.0
+    max_velocity_right: 3.0
     max_velocity_down: 1.0
-    max_yaw_rate: 1.0
-    rate_limit: 0.3
-    min_battery_percent: 20.0
+    max_yaw_rate: 1.5
+
+    max_accel_forward: 2.0
+    max_accel_right: 2.0
+    max_accel_down: 1.0
+    max_yaw_accel: 3.0
+
+    min_battery_percent: 10.0    # sim batteries don't matter
     require_gps: false
-    require_armed: false
+    require_armed: false       # sim only: fake telemetry starts disarmed
+    min_altitude_m: 0.0        # sim only: allow command math at ground altitude
+
     control_rate: 20.0
-    target_timeout: 3.0
+    target_timeout: 1.0
+    telemetry_timeout: 2.0
 
 visualizer_node:
   ros__parameters:
