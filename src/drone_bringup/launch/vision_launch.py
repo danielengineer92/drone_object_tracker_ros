@@ -23,8 +23,8 @@ def generate_launch_description() -> LaunchDescription:
     # Launch arguments
     headless_arg = DeclareLaunchArgument(
         'headless',
-        default_value='false',
-        description='Run without display window'
+        default_value='true',
+        description='Run without display window. Use headless:=false only when a desktop display is available.'
     )
 
     camera_index_arg = DeclareLaunchArgument(
@@ -58,7 +58,13 @@ def generate_launch_description() -> LaunchDescription:
         package='drone_yolo',
         executable='yolo_node',
         name='yolo_node',
-        parameters=[config_file, {'model_path': LaunchConfiguration('model_path')}],
+        parameters=[
+            config_file,
+            {
+                'model_path': LaunchConfiguration('model_path'),
+                'target_class': LaunchConfiguration('target_class'),
+            },
+        ],
         output='screen',
     )
 
@@ -76,6 +82,7 @@ def generate_launch_description() -> LaunchDescription:
         name='control_node',
         parameters=[config_file],
         output='screen',
+        emulate_tty=True,
     )
 
     # Use fake telemetry since no drone is connected
@@ -95,6 +102,14 @@ def generate_launch_description() -> LaunchDescription:
         output='screen',
     )
 
+    health_monitor = Node(
+        package='drone_diagnostics',
+        executable='health_monitor_node',
+        name='health_monitor_node',
+        parameters=[config_file],
+        output='screen',
+    )
+
     return LaunchDescription([
         headless_arg,
         camera_index_arg,
@@ -109,4 +124,5 @@ def generate_launch_description() -> LaunchDescription:
         control,
         fake_telemetry,
         visualizer,
+        health_monitor,
     ])

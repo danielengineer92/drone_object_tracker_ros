@@ -15,6 +15,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 from drone_interfaces.msg import Detection, DetectionArray
+from drone_diagnostics.node_diagnostics import NodeDiagnostics
 
 
 class FakeDetectionNode(Node):
@@ -37,6 +38,7 @@ class FakeDetectionNode(Node):
         self.declare_parameter('detection_dropout_rate', 0.05)
         self.declare_parameter('add_false_detections', True)
         self.declare_parameter('false_detection_rate', 0.1)
+        self.declare_parameter('detections_topic', '/detections')
 
         # Read parameters
         self._publish_rate: float = self.get_parameter('publish_rate').value
@@ -51,6 +53,7 @@ class FakeDetectionNode(Node):
         self._detection_dropout_rate: float = self.get_parameter('detection_dropout_rate').value
         self._add_false_detections: bool = self.get_parameter('add_false_detections').value
         self._false_detection_rate: float = self.get_parameter('false_detection_rate').value
+        self._detections_topic: str = str(self.get_parameter('detections_topic').value)
 
         # State
         self._start_time: float = time.time()
@@ -69,7 +72,7 @@ class FakeDetectionNode(Node):
         # Publisher
         self._detection_pub = self.create_publisher(
             DetectionArray,
-            '/detections',
+            self._detections_topic,
             detection_qos
         )
 
@@ -77,12 +80,16 @@ class FakeDetectionNode(Node):
         publish_period = 1.0 / self._publish_rate
         self._publish_timer = self.create_timer(publish_period, self._publish_detections)
 
+        self._diagnostics = NodeDiagnostics(self, heartbeat_period=5.0, stale_seconds=2.0)
+        self._diagnostics.add_output(self._detections_topic, "fake_detections")
+
         # Status timer
-        self._status_timer = self.create_timer(10.0, self._report_status)
+        self._status_timer = self.create_timer(5.0, self._report_status)
 
         self.get_logger().info(
-            f'Fake detection node initialized: class={self._target_class}, '
-            f'rate={self._publish_rate}Hz, pattern={self._motion_pattern}'
+            f'Fake detection node initialized: topic={self._detections_topic}, '
+            f'class={self._target_class}, rate={self._publish_rate}Hz, '
+            f'pattern={self._motion_pattern}'
         )
 
     def _get_target_position(self, t: float) -> tuple[float, float]:
@@ -189,6 +196,10 @@ class FakeDetectionNode(Node):
 
         self._detection_pub.publish(detection_array)
         self._detection_count += 1
+        self._diagnostics.mark_published(
+            self._detections_topic,
+            summary=f"messages={self._detection_count}, detections={detection_array.count}",
+        )
 
     def _report_status(self) -> None:
         """Report status."""

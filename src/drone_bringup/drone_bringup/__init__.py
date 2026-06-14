@@ -1,1 +1,0 @@
-"""Drone control command generation package."""

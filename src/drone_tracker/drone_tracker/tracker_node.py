@@ -17,6 +17,7 @@ from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 
 from drone_interfaces.msg import Detection, DetectionArray, TargetError
+from drone_diagnostics.node_diagnostics import NodeDiagnostics
 
 
 class TrackingState(Enum):
@@ -55,8 +56,10 @@ class TrackerNode(Node):
         self.declare_parameter("target_area_max", 0.8)
         self.declare_parameter("publish_rate", 30.0)
         self.declare_parameter("proximity_threshold", 0.15)
+        self.declare_parameter("detections_topic", "/detections")
+        self.declare_parameter("target_error_topic", "/target_error")
 
-        self.target_class = self.get_parameter("target_class").value
+        self.target_class = str(self.get_parameter("target_class").value).strip().lower()
         self.min_confidence = self.get_parameter("min_confidence").value
         self.detection_timeout = self.get_parameter("detection_timeout").value
         self.reacquisition_timeout = self.get_parameter("reacquisition_timeout").value
@@ -65,6 +68,8 @@ class TrackerNode(Node):
         self.target_area_max = self.get_parameter("target_area_max").value
         self.publish_rate = self.get_parameter("publish_rate").value
         self.proximity_threshold = self.get_parameter("proximity_threshold").value
+        self.detections_topic = str(self.get_parameter("detections_topic").value)
+        self.target_error_topic = str(self.get_parameter("target_error_topic").value)
 
         self.state = TrackingState.SEARCHING
 
@@ -73,6 +78,9 @@ class TrackerNode(Node):
         self.last_target_center_y = 0.5
         self.last_target_confidence = 0.0
         self.last_target_area = 0.0
+        self.detection_message_count = 0
+        self.target_error_publish_count = 0
+        self.last_detection_array_count = 0
 
         self.error_x_filter = ExponentialMovingAverage(self.smoothing_alpha)
         self.error_y_filter = ExponentialMovingAverage(self.smoothing_alpha)
@@ -91,14 +99,14 @@ class TrackerNode(Node):
 
         self.detection_sub = self.create_subscription(
             DetectionArray,
-            "/detections",
+            self.detections_topic,
             self.detection_callback,
             detection_qos,
         )
 
         self.error_pub = self.create_publisher(
             TargetError,
-            "/target_error",
+            self.target_error_topic,
             error_qos,
         )
 
@@ -112,20 +120,31 @@ class TrackerNode(Node):
             self.report_status,
         )
 
+        self.diagnostics = NodeDiagnostics(self, heartbeat_period=5.0, stale_seconds=2.0)
+        self.diagnostics.add_input(self.detections_topic, "detections")
+        self.diagnostics.add_output(self.target_error_topic, "target_error")
+
         self.get_logger().info(
-            f"Tracker node started | target_class={self.target_class}, "
-            f"min_confidence={self.min_confidence}, "
+            f"Tracker node started | detections_topic={self.detections_topic}, "
+            f"target_error_topic={self.target_error_topic}, "
+            f"target_class={self.target_class}, min_confidence={self.min_confidence}, "
             f"timeout={self.detection_timeout}s"
         )
 
     def detection_callback(self, msg: DetectionArray) -> None:
         current_time = time.time()
+        self.detection_message_count += 1
+        self.last_detection_array_count = msg.count
+        self.diagnostics.mark_received(
+            self.detections_topic,
+            summary=f"messages={self.detection_message_count}, detections={msg.count}",
+        )
 
         best_detection: Optional[Detection] = None
         best_score = -999.0
 
         for detection in msg.detections:
-            if detection.class_name != self.target_class:
+            if detection.class_name.strip().lower() != self.target_class:
                 continue
 
             if detection.confidence < self.min_confidence:
@@ -185,6 +204,18 @@ class TrackerNode(Node):
     def publish_error(self) -> None:
         current_time = time.time()
 
+        # Do not keep publishing a fresh LOCKED error if detections stop arriving.
+        # This protects the controller from chasing stale target coordinates.
+        if (
+            self.state == TrackingState.LOCKED
+            and self.last_detection_time > 0.0
+            and current_time - self.last_detection_time > self.detection_timeout
+        ):
+            self.state = TrackingState.LOST
+            self.error_x_filter.reset()
+            self.error_y_filter.reset()
+            self.get_logger().warning("Target lost: detection stream timed out.")
+
         msg = TargetError()
         msg.stamp = self.get_clock().now().to_msg()
         msg.target_class = self.target_class
@@ -217,11 +248,20 @@ class TrackerNode(Node):
                 msg.time_since_last_seen = -1.0
 
         self.error_pub.publish(msg)
+        self.target_error_publish_count += 1
+        self.diagnostics.mark_published(
+            self.target_error_topic,
+            summary=f"messages={self.target_error_publish_count}, state={self.state.value}, visible={msg.target_visible}",
+        )
 
     def report_status(self) -> None:
         self.get_logger().info(
             f"Tracker status | state={self.state.value}, "
             f"target={self.target_class}, "
+            f"detection_messages={self.detection_message_count}, "
+            f"last_detection_count={self.last_detection_array_count}, "
+            f"target_error_messages={self.target_error_publish_count}, "
+            f"last_detection_age={self.diagnostics.format_age(self.detections_topic)}, "
             f"confidence={self.last_target_confidence:.2f}, "
             f"area={self.last_target_area:.4f}"
         )

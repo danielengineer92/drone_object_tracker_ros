@@ -16,6 +16,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 from drone_interfaces.msg import DroneTelemetry
+from drone_diagnostics.node_diagnostics import NodeDiagnostics
 
 
 class FakeTelemetryNode(Node):
@@ -38,6 +39,7 @@ class FakeTelemetryNode(Node):
         self.declare_parameter('flight_mode', 'HOLD')
         self.declare_parameter('gps_satellites', 12)
         self.declare_parameter('simulate_gps_noise', True)
+        self.declare_parameter('telemetry_topic', '/drone/telemetry')
 
         # Read parameters
         self._publish_rate: float = self.get_parameter('publish_rate').value
@@ -52,11 +54,13 @@ class FakeTelemetryNode(Node):
         self._flight_mode: str = self.get_parameter('flight_mode').value
         self._gps_satellites: int = self.get_parameter('gps_satellites').value
         self._simulate_gps_noise: bool = self.get_parameter('simulate_gps_noise').value
+        self._telemetry_topic: str = str(self.get_parameter('telemetry_topic').value)
 
         # State
         self._start_time: float = time.time()
         self._battery_percent: float = self._initial_battery
         self._current_altitude: float = 0.0
+        self._telemetry_count: int = 0
 
         # Simulated attitude
         self._roll: float = 0.0
@@ -73,7 +77,7 @@ class FakeTelemetryNode(Node):
         # Publisher
         self._telemetry_pub = self.create_publisher(
             DroneTelemetry,
-            '/drone/telemetry',
+            self._telemetry_topic,
             telemetry_qos
         )
 
@@ -81,17 +85,20 @@ class FakeTelemetryNode(Node):
         publish_period = 1.0 / self._publish_rate
         self._publish_timer = self.create_timer(publish_period, self._publish_telemetry)
 
+        self._diagnostics = NodeDiagnostics(self, heartbeat_period=5.0, stale_seconds=2.0)
+        self._diagnostics.add_output(self._telemetry_topic, "fake_telemetry")
+
         # Status timer
-        self._status_timer = self.create_timer(10.0, self._report_status)
+        self._status_timer = self.create_timer(5.0, self._report_status)
 
         # Altitude ramp (if simulating flying)
         if self._simulate_flying:
             self._current_altitude = self._flight_altitude
 
         self.get_logger().info(
-            f'Fake telemetry node initialized: rate={self._publish_rate}Hz, '
-            f'armed={self._simulate_armed}, flying={self._simulate_flying}, '
-            f'battery={self._initial_battery}%'
+            f'Fake telemetry node initialized: topic={self._telemetry_topic}, '
+            f'rate={self._publish_rate}Hz, armed={self._simulate_armed}, '
+            f'flying={self._simulate_flying}, battery={self._initial_battery}%'
         )
 
     def _publish_telemetry(self) -> None:
@@ -173,11 +180,16 @@ class FakeTelemetryNode(Node):
         msg.health_gps_ok = True
 
         self._telemetry_pub.publish(msg)
+        self._telemetry_count += 1
+        self._diagnostics.mark_published(
+            self._telemetry_topic,
+            summary=f"messages={self._telemetry_count}, battery={msg.battery_remaining_percent:.1f}%, armed={msg.armed}",
+        )
 
     def _report_status(self) -> None:
         """Report status."""
         self.get_logger().info(
-            f'Fake telemetry: battery={self._battery_percent:.1f}%, '
+            f'Fake telemetry: messages={self._telemetry_count}, battery={self._battery_percent:.1f}%, '
             f'alt={self._current_altitude:.1f}m, '
             f'armed={self._simulate_armed}, mode={self._flight_mode}'
         )

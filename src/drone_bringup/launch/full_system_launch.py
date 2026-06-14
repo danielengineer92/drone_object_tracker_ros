@@ -1,8 +1,8 @@
 """
 Launch file for full system mode.
 
-Launches real camera, YOLO detection, tracker, control, real telemetry, and visualizer.
-Requires camera and PX4 drone connection.
+Launches real camera, YOLO detection, tracker, control, real telemetry,
+and visualizer. Requires camera and PX4 drone connection.
 
 WARNING: autonomous_enabled defaults to False. Commands are logged only.
 """
@@ -18,6 +18,7 @@ from launch_ros.actions import Node
 
 def generate_launch_description() -> LaunchDescription:
     """Generate the full system launch description."""
+
     # Get config file path
     bringup_dir = get_package_share_directory('drone_bringup')
     config_file = os.path.join(bringup_dir, 'config', 'full_system_params.yaml')
@@ -25,8 +26,8 @@ def generate_launch_description() -> LaunchDescription:
     # Launch arguments
     headless_arg = DeclareLaunchArgument(
         'headless',
-        default_value='false',
-        description='Run without display window'
+        default_value='true',
+        description='Run without display window. Use headless:=false only when a desktop display is available.'
     )
 
     camera_index_arg = DeclareLaunchArgument(
@@ -66,7 +67,13 @@ def generate_launch_description() -> LaunchDescription:
         package='drone_yolo',
         executable='yolo_node',
         name='yolo_node',
-        parameters=[config_file, {'model_path': LaunchConfiguration('model_path')}],
+        parameters=[
+            config_file,
+            {
+                'model_path': LaunchConfiguration('model_path'),
+                'target_class': LaunchConfiguration('target_class'),
+            },
+        ],
         output='screen',
     )
 
@@ -92,6 +99,7 @@ def generate_launch_description() -> LaunchDescription:
         name='control_node',
         parameters=[config_file],
         output='screen',
+        emulate_tty=True,
     )
 
     visualizer = Node(
@@ -99,6 +107,14 @@ def generate_launch_description() -> LaunchDescription:
         executable='visualizer_node',
         name='visualizer_node',
         parameters=[config_file, {'headless': LaunchConfiguration('headless')}],
+        output='screen',
+    )
+
+    health_monitor = Node(
+        package='drone_diagnostics',
+        executable='health_monitor_node',
+        name='health_monitor_node',
+        parameters=[config_file],
         output='screen',
     )
 
@@ -118,4 +134,5 @@ def generate_launch_description() -> LaunchDescription:
         telemetry,
         control,
         visualizer,
+        health_monitor,
     ])

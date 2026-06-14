@@ -2,6 +2,8 @@
 
 fake_camera_node:
   ros__parameters:
+    image_topic: "/camera/image_raw"
+    frame_id: "camera_optical_frame"
     frame_width: 640
     frame_height: 480
     fps: 30.0
@@ -13,6 +15,7 @@ fake_camera_node:
 
 fake_detection_node:
   ros__parameters:
+    detections_topic: "/detections"
     publish_rate: 15.0
     target_class: "person"
     target_class_id: 0
@@ -28,6 +31,7 @@ fake_detection_node:
 
 fake_telemetry_node:
   ros__parameters:
+    telemetry_topic: "/drone/telemetry"
     publish_rate: 10.0
     simulate_armed: false
     simulate_flying: false
@@ -43,6 +47,8 @@ fake_telemetry_node:
 
 tracker_node:
   ros__parameters:
+    detections_topic: "/detections"
+    target_error_topic: "/target_error"
     target_class: "person"
     min_confidence: 0.4
     detection_timeout: 2.0
@@ -55,26 +61,45 @@ tracker_node:
 
 control_node:
   ros__parameters:
-    autonomous_enabled: false
+    target_error_topic: "/target_error"
+    telemetry_topic: "/drone/telemetry"
+    control_command_topic: "/control_command"
+    autonomous_enabled: true     # safe to enable in sim
+
+    gain_yaw: 1.0
+    gain_down: 0.4
     gain_forward: 1.0
-    gain_right: 0.8
-    gain_down: 0.5
-    gain_yaw: 0.6
-    deadband_x: 0.05
-    deadband_y: 0.05
-    max_velocity_forward: 2.0
-    max_velocity_right: 2.0
+    gain_right: 1.0
+
+    deadband_x: 0.03
+    deadband_y: 0.03
+
+    max_velocity_forward: 3.0
+    max_velocity_right: 3.0
     max_velocity_down: 1.0
-    max_yaw_rate: 1.0
-    rate_limit: 0.3
-    min_battery_percent: 20.0
+    max_yaw_rate: 1.5
+
+    max_accel_forward: 2.0
+    max_accel_right: 2.0
+    max_accel_down: 1.0
+    max_yaw_accel: 3.0
+
+    min_battery_percent: 10.0    # sim batteries don't matter
     require_gps: false
-    require_armed: false
+    require_armed: false       # sim only: fake telemetry starts disarmed
+    min_altitude_m: 0.0        # sim only: allow command math at ground altitude
+
     control_rate: 20.0
-    target_timeout: 3.0
+    target_timeout: 1.0
+    telemetry_timeout: 2.0
 
 visualizer_node:
   ros__parameters:
+    image_topic: "/camera/image_raw"
+    detections_topic: "/detections"
+    target_error_topic: "/target_error"
+    telemetry_topic: "/drone/telemetry"
+    control_command_topic: "/control_command"
     window_name: "Drone Vision System (SIMULATION)"
     display_width: 960
     display_height: 720
@@ -83,4 +108,14 @@ visualizer_node:
     show_telemetry: true
     show_control: true
     display_fps: 30.0
-    headless: false
+    headless: true
+
+health_monitor_node:
+  ros__parameters:
+    image_topic: "/camera/image_raw"
+    detections_topic: "/detections"
+    target_error_topic: "/target_error"
+    telemetry_topic: "/drone/telemetry"
+    control_command_topic: "/control_command"
+    heartbeat_period: 2.0
+    stale_seconds: 2.0
