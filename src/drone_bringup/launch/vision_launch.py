@@ -102,6 +102,14 @@ def generate_launch_description() -> LaunchDescription:
         output='screen',
     )
 
+    health_monitor = Node(
+        package='drone_diagnostics',
+        executable='health_monitor_node',
+        name='health_monitor_node',
+        parameters=[config_file],
+        output='screen',
+    )
+
     return LaunchDescription([
         headless_arg,
         camera_index_arg,
@@ -116,4 +124,5 @@ def generate_launch_description() -> LaunchDescription:
         control,
         fake_telemetry,
         visualizer,
+        health_monitor,
     ])

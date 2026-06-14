@@ -109,3 +109,13 @@ visualizer_node:
     show_control: true
     display_fps: 30.0
     headless: true
+
+health_monitor_node:
+  ros__parameters:
+    image_topic: "/camera/image_raw"
+    detections_topic: "/detections"
+    target_error_topic: "/target_error"
+    telemetry_topic: "/drone/telemetry"
+    control_command_topic: "/control_command"
+    heartbeat_period: 2.0
+    stale_seconds: 2.0

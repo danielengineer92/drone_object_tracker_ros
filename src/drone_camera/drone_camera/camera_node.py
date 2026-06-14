@@ -7,6 +7,8 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 
+from drone_diagnostics.node_diagnostics import NodeDiagnostics
+
 
 class CameraNode(Node):
     MAX_CONSECUTIVE_FAILURES = 30
@@ -64,6 +66,11 @@ class CameraNode(Node):
         self.publisher = self.create_publisher(Image, self.image_topic, qos_profile_sensor_data)
         self.timer = self.create_timer(1.0 / self.fps, self.publish_frame)
         self._consecutive_failures = 0
+        self.frame_count = 0
+        self.last_frame_time = 0.0
+
+        self.diagnostics = NodeDiagnostics(self, heartbeat_period=5.0, stale_seconds=2.0)
+        self.diagnostics.add_output(self.image_topic, "camera_frames")
 
         self.get_logger().info(
             f"Camera node started | topic={self.image_topic}, index={self.camera_index}, "
@@ -93,6 +100,11 @@ class CameraNode(Node):
         msg.header.stamp = stamp
         msg.header.frame_id = self.frame_id
         self.publisher.publish(msg)
+        self.frame_count += 1
+        self.diagnostics.mark_published(
+            self.image_topic,
+            summary=f"frames={self.frame_count}, size={msg.width}x{msg.height}",
+        )
 
     def destroy_node(self) -> None:
         if hasattr(self, "cap") and self.cap.isOpened():

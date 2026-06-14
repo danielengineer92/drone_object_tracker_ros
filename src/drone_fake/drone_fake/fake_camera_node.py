@@ -18,6 +18,8 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Image
 from std_msgs.msg import Header
 
+from drone_diagnostics.node_diagnostics import NodeDiagnostics
+
 
 class FakeCameraNode(Node):
     """ROS 2 node that generates synthetic camera images for testing."""
@@ -68,6 +70,9 @@ class FakeCameraNode(Node):
         # Timer for frame generation
         timer_period: float = 1.0 / self._fps
         self._capture_timer = self.create_timer(timer_period, self._generate_frame)
+
+        self._diagnostics = NodeDiagnostics(self, heartbeat_period=5.0, stale_seconds=2.0)
+        self._diagnostics.add_output(self._image_topic, "fake_camera_frames")
 
         # FPS reporting
         self._fps_timer = self.create_timer(5.0, self._report_fps)
@@ -234,6 +239,10 @@ class FakeCameraNode(Node):
         self._image_pub.publish(img_msg)
         self._frame_count += 1
         self._fps_count += 1
+        self._diagnostics.mark_published(
+            self._image_topic,
+            summary=f"frames={self._frame_count}, size={img_msg.width}x{img_msg.height}",
+        )
 
     def _report_fps(self) -> None:
         """Report FPS."""

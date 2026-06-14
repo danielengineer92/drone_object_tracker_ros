@@ -14,6 +14,7 @@
   <depend>drone_interfaces</depend>
 
   <exec_depend>python3-opencv</exec_depend>
+  <depend>drone_diagnostics</depend>
 
   <export>
     <build_type>ament_python</build_type>

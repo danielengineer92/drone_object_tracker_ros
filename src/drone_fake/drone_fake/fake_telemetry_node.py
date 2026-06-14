@@ -16,6 +16,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 from drone_interfaces.msg import DroneTelemetry
+from drone_diagnostics.node_diagnostics import NodeDiagnostics
 
 
 class FakeTelemetryNode(Node):
@@ -59,6 +60,7 @@ class FakeTelemetryNode(Node):
         self._start_time: float = time.time()
         self._battery_percent: float = self._initial_battery
         self._current_altitude: float = 0.0
+        self._telemetry_count: int = 0
 
         # Simulated attitude
         self._roll: float = 0.0
@@ -83,8 +85,11 @@ class FakeTelemetryNode(Node):
         publish_period = 1.0 / self._publish_rate
         self._publish_timer = self.create_timer(publish_period, self._publish_telemetry)
 
+        self._diagnostics = NodeDiagnostics(self, heartbeat_period=5.0, stale_seconds=2.0)
+        self._diagnostics.add_output(self._telemetry_topic, "fake_telemetry")
+
         # Status timer
-        self._status_timer = self.create_timer(10.0, self._report_status)
+        self._status_timer = self.create_timer(5.0, self._report_status)
 
         # Altitude ramp (if simulating flying)
         if self._simulate_flying:
@@ -175,11 +180,16 @@ class FakeTelemetryNode(Node):
         msg.health_gps_ok = True
 
         self._telemetry_pub.publish(msg)
+        self._telemetry_count += 1
+        self._diagnostics.mark_published(
+            self._telemetry_topic,
+            summary=f"messages={self._telemetry_count}, battery={msg.battery_remaining_percent:.1f}%, armed={msg.armed}",
+        )
 
     def _report_status(self) -> None:
         """Report status."""
         self.get_logger().info(
-            f'Fake telemetry: battery={self._battery_percent:.1f}%, '
+            f'Fake telemetry: messages={self._telemetry_count}, battery={self._battery_percent:.1f}%, '
             f'alt={self._current_altitude:.1f}m, '
             f'armed={self._simulate_armed}, mode={self._flight_mode}'
         )

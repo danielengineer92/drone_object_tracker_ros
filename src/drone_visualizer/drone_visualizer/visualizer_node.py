@@ -18,6 +18,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Image
 
 from drone_interfaces.msg import DetectionArray, Detection, TargetError, DroneTelemetry, ControlCommand
+from drone_diagnostics.node_diagnostics import NodeDiagnostics
 
 
 class VisualizerNode(Node):
@@ -76,6 +77,11 @@ class VisualizerNode(Node):
         self._frame_count: int = 0
         self._last_fps_time: float = time.time()
         self._display_measured_fps: float = 0.0
+        self._image_count: int = 0
+        self._detection_count: int = 0
+        self._target_error_count: int = 0
+        self._telemetry_count: int = 0
+        self._command_count: int = 0
 
         # Colors (BGR)
         self._color_green = (0, 255, 0)
@@ -145,6 +151,13 @@ class VisualizerNode(Node):
             cv2.namedWindow(self._window_name, cv2.WINDOW_NORMAL)
             cv2.resizeWindow(self._window_name, self._display_width, self._display_height)
 
+        self._diagnostics = NodeDiagnostics(self, heartbeat_period=5.0, stale_seconds=2.0)
+        self._diagnostics.add_input(self._image_topic, "camera_frames")
+        self._diagnostics.add_input(self._detections_topic, "detections")
+        self._diagnostics.add_input(self._target_error_topic, "target_error")
+        self._diagnostics.add_input(self._telemetry_topic, "telemetry")
+        self._diagnostics.add_input(self._control_command_topic, "control_command")
+
         self.get_logger().info(
             f'Visualizer node initialized: image_topic={self._image_topic}, '
             f'detections_topic={self._detections_topic}, '
@@ -156,6 +169,11 @@ class VisualizerNode(Node):
 
     def _image_callback(self, msg: Image) -> None:
         """Store the latest camera frame."""
+        self._image_count += 1
+        self._diagnostics.mark_received(
+            self._image_topic,
+            summary=f'frames={self._image_count}, size={msg.width}x{msg.height}',
+        )
         try:
             self._latest_frame = self._bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         except Exception as e:
@@ -163,18 +181,38 @@ class VisualizerNode(Node):
 
     def _detection_callback(self, msg: DetectionArray) -> None:
         """Store the latest detections."""
+        self._detection_count += 1
+        self._diagnostics.mark_received(
+            self._detections_topic,
+            summary=f'messages={self._detection_count}, detections={msg.count}',
+        )
         self._latest_detections = msg
 
     def _target_error_callback(self, msg: TargetError) -> None:
         """Store the latest target error."""
+        self._target_error_count += 1
+        self._diagnostics.mark_received(
+            self._target_error_topic,
+            summary=f'messages={self._target_error_count}, state={msg.tracking_state}, visible={msg.target_visible}',
+        )
         self._latest_target_error = msg
 
     def _telemetry_callback(self, msg: DroneTelemetry) -> None:
         """Store the latest telemetry."""
+        self._telemetry_count += 1
+        self._diagnostics.mark_received(
+            self._telemetry_topic,
+            summary=f'messages={self._telemetry_count}, connected={msg.connected}, battery={msg.battery_remaining_percent:.1f}%',
+        )
         self._latest_telemetry = msg
 
     def _command_callback(self, msg: ControlCommand) -> None:
         """Store the latest control command."""
+        self._command_count += 1
+        self._diagnostics.mark_received(
+            self._control_command_topic,
+            summary=f'messages={self._command_count}, executed={msg.executed}, status={msg.execution_status}',
+        )
         self._latest_command = msg
 
     def _draw_detections(self, frame: np.ndarray) -> np.ndarray:

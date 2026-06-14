@@ -16,6 +16,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 from drone_interfaces.msg import DroneTelemetry
+from drone_diagnostics.node_diagnostics import NodeDiagnostics
 
 
 class TelemetryNode(Node):
@@ -44,6 +45,7 @@ class TelemetryNode(Node):
         self._mavsdk = None
         self._connected: bool = False
         self._connection_status: str = "DISCONNECTED"
+        self._telemetry_publish_count: int = 0
 
         # Telemetry data (protected by lock)
         self._data_lock = threading.Lock()
@@ -90,8 +92,11 @@ class TelemetryNode(Node):
         publish_period = 1.0 / self._publish_rate
         self._publish_timer = self.create_timer(publish_period, self._publish_telemetry)
 
+        self._diagnostics = NodeDiagnostics(self, heartbeat_period=5.0, stale_seconds=2.0)
+        self._diagnostics.add_output(self._telemetry_topic, "telemetry")
+
         # Status reporting timer
-        self._status_timer = self.create_timer(10.0, self._report_status)
+        self._status_timer = self.create_timer(5.0, self._report_status)
 
         # Start MAVSDK connection in background thread
         self._async_thread: Optional[threading.Thread] = None
@@ -305,13 +310,21 @@ class TelemetryNode(Node):
             msg.health_gps_ok = bool(self._telemetry_data['health_gps_ok'])
 
         self._telemetry_pub.publish(msg)
+        self._telemetry_publish_count += 1
+        self._diagnostics.mark_published(
+            self._telemetry_topic,
+            summary=(
+                f"messages={self._telemetry_publish_count}, connected={msg.connected}, "
+                f"status={msg.connection_status}, battery={msg.battery_remaining_percent:.1f}%"
+            ),
+        )
 
     def _report_status(self) -> None:
         """Report telemetry node status."""
         with self._data_lock:
             self.get_logger().info(
-                f'Telemetry status: connected={self._connected}, '
-                f'status={self._connection_status}, '
+                f'Telemetry status: published={self._telemetry_publish_count}, '
+                f'connected={self._connected}, status={self._connection_status}, '
                 f'armed={self._telemetry_data["armed"]}, '
                 f'mode={self._telemetry_data["flight_mode"]}, '
                 f'battery={self._telemetry_data["battery_remaining"]:.1f}%'

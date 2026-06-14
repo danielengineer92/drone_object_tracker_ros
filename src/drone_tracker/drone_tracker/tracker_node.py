@@ -17,6 +17,7 @@ from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 
 from drone_interfaces.msg import Detection, DetectionArray, TargetError
+from drone_diagnostics.node_diagnostics import NodeDiagnostics
 
 
 class TrackingState(Enum):
@@ -77,6 +78,9 @@ class TrackerNode(Node):
         self.last_target_center_y = 0.5
         self.last_target_confidence = 0.0
         self.last_target_area = 0.0
+        self.detection_message_count = 0
+        self.target_error_publish_count = 0
+        self.last_detection_array_count = 0
 
         self.error_x_filter = ExponentialMovingAverage(self.smoothing_alpha)
         self.error_y_filter = ExponentialMovingAverage(self.smoothing_alpha)
@@ -116,6 +120,10 @@ class TrackerNode(Node):
             self.report_status,
         )
 
+        self.diagnostics = NodeDiagnostics(self, heartbeat_period=5.0, stale_seconds=2.0)
+        self.diagnostics.add_input(self.detections_topic, "detections")
+        self.diagnostics.add_output(self.target_error_topic, "target_error")
+
         self.get_logger().info(
             f"Tracker node started | detections_topic={self.detections_topic}, "
             f"target_error_topic={self.target_error_topic}, "
@@ -125,6 +133,12 @@ class TrackerNode(Node):
 
     def detection_callback(self, msg: DetectionArray) -> None:
         current_time = time.time()
+        self.detection_message_count += 1
+        self.last_detection_array_count = msg.count
+        self.diagnostics.mark_received(
+            self.detections_topic,
+            summary=f"messages={self.detection_message_count}, detections={msg.count}",
+        )
 
         best_detection: Optional[Detection] = None
         best_score = -999.0
@@ -234,11 +248,20 @@ class TrackerNode(Node):
                 msg.time_since_last_seen = -1.0
 
         self.error_pub.publish(msg)
+        self.target_error_publish_count += 1
+        self.diagnostics.mark_published(
+            self.target_error_topic,
+            summary=f"messages={self.target_error_publish_count}, state={self.state.value}, visible={msg.target_visible}",
+        )
 
     def report_status(self) -> None:
         self.get_logger().info(
             f"Tracker status | state={self.state.value}, "
             f"target={self.target_class}, "
+            f"detection_messages={self.detection_message_count}, "
+            f"last_detection_count={self.last_detection_array_count}, "
+            f"target_error_messages={self.target_error_publish_count}, "
+            f"last_detection_age={self.diagnostics.format_age(self.detections_topic)}, "
             f"confidence={self.last_target_confidence:.2f}, "
             f"area={self.last_target_area:.4f}"
         )

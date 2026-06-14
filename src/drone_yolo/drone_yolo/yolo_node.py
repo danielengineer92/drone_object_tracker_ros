@@ -20,6 +20,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Image
 
 from drone_interfaces.msg import Detection, DetectionArray
+from drone_diagnostics.node_diagnostics import NodeDiagnostics
 
 
 class YoloNode(Node):
@@ -52,6 +53,10 @@ class YoloNode(Node):
         self.detections_topic = str(self.get_parameter("detections_topic").value)
         self.process_every_n_frames = max(1, int(self.get_parameter("process_every_n_frames").value))
         self._received_frames = 0
+        self._skipped_frames = 0
+        self._published_detection_arrays = 0
+        self._last_detection_count = 0
+        self._last_image_time = 0.0
         self._target_class_ids: Optional[List[int]] = None
 
         self.bridge = CvBridge()
@@ -89,7 +94,11 @@ class YoloNode(Node):
             detection_qos,
         )
 
-        self.report_timer = self.create_timer(10.0, self._report_performance)
+        self.diagnostics = NodeDiagnostics(self, heartbeat_period=5.0, stale_seconds=2.0)
+        self.diagnostics.add_input(self.image_topic, "camera_frames")
+        self.diagnostics.add_output(self.detections_topic, "detections")
+
+        self.report_timer = self.create_timer(5.0, self._report_performance)
 
         self.get_logger().info(
             f"YOLO node initialized | image_topic={self.image_topic}, "
@@ -162,11 +171,19 @@ class YoloNode(Node):
         return matches
 
     def _image_callback(self, msg: Image) -> None:
+        self._received_frames += 1
+        self._last_image_time = time.time()
+        self.diagnostics.mark_received(
+            self.image_topic,
+            summary=f"frames={self._received_frames}, stamp={msg.header.stamp.sec}.{msg.header.stamp.nanosec:09d}",
+        )
+
         if not self.model_loaded:
+            self.get_logger().warning("Received image but YOLO model is not loaded; dropping frame.", throttle_duration_sec=2.0)
             return
 
-        self._received_frames += 1
         if self._received_frames % self.process_every_n_frames != 0:
+            self._skipped_frames += 1
             return
 
         try:
@@ -242,21 +259,34 @@ class YoloNode(Node):
             detection_array.count = len(detections)
 
             self.detection_pub.publish(detection_array)
+            self._published_detection_arrays += 1
+            self._last_detection_count = detection_array.count
+            self.diagnostics.mark_published(
+                self.detections_topic,
+                summary=f"arrays={self._published_detection_arrays}, last_count={detection_array.count}",
+            )
 
         except Exception as exc:
             self.get_logger().error(f"Error during YOLO inference: {exc}")
 
     def _report_performance(self) -> None:
         if self.inference_count == 0:
-            self.get_logger().info("YOLO node: no inferences yet.")
+            self.get_logger().info(
+                f"YOLO status | no inferences yet, frames_received={self._received_frames}, "
+                f"frames_skipped={self._skipped_frames}, arrays_published={self._published_detection_arrays}, "
+                f"last_image_age={self.diagnostics.format_age(self.image_topic)}"
+            )
             return
 
         avg_time = self.total_inference_time / self.inference_count
         avg_fps = 1.0 / avg_time if avg_time > 0.0 else 0.0
 
         self.get_logger().info(
-            f"YOLO performance | avg={avg_time * 1000:.1f} ms, "
-            f"fps={avg_fps:.1f}, count={self.inference_count}"
+            f"YOLO status | avg_inference={avg_time * 1000:.1f} ms, "
+            f"inference_fps={avg_fps:.1f}, inference_count={self.inference_count}, "
+            f"frames_received={self._received_frames}, frames_skipped={self._skipped_frames}, "
+            f"arrays_published={self._published_detection_arrays}, last_detection_count={self._last_detection_count}, "
+            f"last_image_age={self.diagnostics.format_age(self.image_topic)}"
         )
 
         self.inference_count = 0

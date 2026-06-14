@@ -23,6 +23,7 @@ from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 
 from drone_interfaces.msg import ControlCommand, DroneTelemetry, TargetError
+from drone_diagnostics.node_diagnostics import NodeDiagnostics
 
 
 CMD_IDLE = "IDLE"
@@ -133,6 +134,10 @@ class ControlNode(Node):
         self.last_command_yaw = 0.0
 
         self.command_count = 0
+        self.idle_command_count = 0
+        self.executed_command_count = 0
+        self.target_error_count = 0
+        self.telemetry_count = 0
 
         qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
@@ -166,6 +171,12 @@ class ControlNode(Node):
         )
 
         self.status_timer = self.create_timer(5.0, self.report_status)
+
+        self.diagnostics = NodeDiagnostics(self, heartbeat_period=5.0, stale_seconds=2.0)
+        self.diagnostics.add_input(self.target_error_topic, "target_error", stale_seconds=self.target_timeout)
+        self.diagnostics.add_input(self.telemetry_topic, "telemetry", stale_seconds=self.telemetry_timeout)
+        self.diagnostics.add_output(self.control_command_topic, "control_command")
+
         self.add_on_set_parameters_callback(self.on_parameter_change)
 
         self.get_logger().warning(
@@ -253,10 +264,20 @@ class ControlNode(Node):
     def target_error_callback(self, msg: TargetError) -> None:
         self.last_target_error = msg
         self.last_target_error_time = time.time()
+        self.target_error_count += 1
+        self.diagnostics.mark_received(
+            self.target_error_topic,
+            summary=f"messages={self.target_error_count}, state={msg.tracking_state}, visible={msg.target_visible}",
+        )
 
     def telemetry_callback(self, msg: DroneTelemetry) -> None:
         self.last_telemetry = msg
         self.last_telemetry_time = time.time()
+        self.telemetry_count += 1
+        self.diagnostics.mark_received(
+            self.telemetry_topic,
+            summary=f"messages={self.telemetry_count}, connected={msg.connected}, battery={msg.battery_remaining_percent:.1f}%",
+        )
 
     @staticmethod
     def apply_deadband(value: float, deadband: float) -> float:
@@ -343,14 +364,19 @@ class ControlNode(Node):
         self.last_command_down = 0.0
         self.last_command_yaw = 0.0
 
-        self.command_pub.publish(
-            self.make_command(
-                CMD_IDLE,
-                status,
-                executed=False,
-                source_error_x=source_error_x,
-                source_error_y=source_error_y,
-            )
+        command = self.make_command(
+            CMD_IDLE,
+            status,
+            executed=False,
+            source_error_x=source_error_x,
+            source_error_y=source_error_y,
+        )
+        self.command_pub.publish(command)
+        self.command_count += 1
+        self.idle_command_count += 1
+        self.diagnostics.mark_published(
+            self.control_command_topic,
+            summary=f"commands={self.command_count}, idle={self.idle_command_count}, status={status}",
         )
 
     def control_loop(self) -> None:
@@ -459,11 +485,25 @@ class ControlNode(Node):
 
         self.command_pub.publish(command)
         self.command_count += 1
+        if safe:
+            self.executed_command_count += 1
+        else:
+            self.idle_command_count += 1
+        self.diagnostics.mark_published(
+            self.control_command_topic,
+            summary=(
+                f"commands={self.command_count}, executed={self.executed_command_count}, "
+                f"idle={self.idle_command_count}, status={reason}"
+            ),
+        )
 
     def report_status(self) -> None:
         self.get_logger().info(
             f"Control status | autonomous={self.autonomous_enabled}, "
-            f"commands={self.command_count}, "
+            f"commands={self.command_count}, executed={self.executed_command_count}, idle={self.idle_command_count}, "
+            f"target_msgs={self.target_error_count}, telemetry_msgs={self.telemetry_count}, "
+            f"target_age={self.diagnostics.format_age(self.target_error_topic)}, "
+            f"telemetry_age={self.diagnostics.format_age(self.telemetry_topic)}, "
             f"forward={self.last_command_forward:.3f}, "
             f"right={self.last_command_right:.3f}, "
             f"down={self.last_command_down:.3f}, "

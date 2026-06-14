@@ -15,6 +15,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 from drone_interfaces.msg import Detection, DetectionArray
+from drone_diagnostics.node_diagnostics import NodeDiagnostics
 
 
 class FakeDetectionNode(Node):
@@ -79,8 +80,11 @@ class FakeDetectionNode(Node):
         publish_period = 1.0 / self._publish_rate
         self._publish_timer = self.create_timer(publish_period, self._publish_detections)
 
+        self._diagnostics = NodeDiagnostics(self, heartbeat_period=5.0, stale_seconds=2.0)
+        self._diagnostics.add_output(self._detections_topic, "fake_detections")
+
         # Status timer
-        self._status_timer = self.create_timer(10.0, self._report_status)
+        self._status_timer = self.create_timer(5.0, self._report_status)
 
         self.get_logger().info(
             f'Fake detection node initialized: topic={self._detections_topic}, '
@@ -192,6 +196,10 @@ class FakeDetectionNode(Node):
 
         self._detection_pub.publish(detection_array)
         self._detection_count += 1
+        self._diagnostics.mark_published(
+            self._detections_topic,
+            summary=f"messages={self._detection_count}, detections={detection_array.count}",
+        )
 
     def _report_status(self) -> None:
         """Report status."""
