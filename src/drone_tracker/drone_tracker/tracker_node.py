@@ -55,6 +55,8 @@ class TrackerNode(Node):
         self.declare_parameter("target_area_max", 0.8)
         self.declare_parameter("publish_rate", 30.0)
         self.declare_parameter("proximity_threshold", 0.15)
+        self.declare_parameter("detections_topic", "/detections")
+        self.declare_parameter("target_error_topic", "/target_error")
 
         self.target_class = str(self.get_parameter("target_class").value).strip().lower()
         self.min_confidence = self.get_parameter("min_confidence").value
@@ -65,6 +67,8 @@ class TrackerNode(Node):
         self.target_area_max = self.get_parameter("target_area_max").value
         self.publish_rate = self.get_parameter("publish_rate").value
         self.proximity_threshold = self.get_parameter("proximity_threshold").value
+        self.detections_topic = str(self.get_parameter("detections_topic").value)
+        self.target_error_topic = str(self.get_parameter("target_error_topic").value)
 
         self.state = TrackingState.SEARCHING
 
@@ -91,14 +95,14 @@ class TrackerNode(Node):
 
         self.detection_sub = self.create_subscription(
             DetectionArray,
-            "/detections",
+            self.detections_topic,
             self.detection_callback,
             detection_qos,
         )
 
         self.error_pub = self.create_publisher(
             TargetError,
-            "/target_error",
+            self.target_error_topic,
             error_qos,
         )
 
@@ -113,8 +117,9 @@ class TrackerNode(Node):
         )
 
         self.get_logger().info(
-            f"Tracker node started | target_class={self.target_class}, "
-            f"min_confidence={self.min_confidence}, "
+            f"Tracker node started | detections_topic={self.detections_topic}, "
+            f"target_error_topic={self.target_error_topic}, "
+            f"target_class={self.target_class}, min_confidence={self.min_confidence}, "
             f"timeout={self.detection_timeout}s"
         )
 

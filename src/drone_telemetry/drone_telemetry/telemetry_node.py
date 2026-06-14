@@ -30,12 +30,14 @@ class TelemetryNode(Node):
         self.declare_parameter('publish_rate', 10.0)
         self.declare_parameter('reconnect_interval', 5.0)
         self.declare_parameter('connection_timeout', 10.0)
+        self.declare_parameter('telemetry_topic', '/drone/telemetry')
 
         # Read parameters
         self._connection_url: str = self.get_parameter('connection_url').value
         self._publish_rate: float = self.get_parameter('publish_rate').value
         self._reconnect_interval: float = self.get_parameter('reconnect_interval').value
         self._connection_timeout: float = self.get_parameter('connection_timeout').value
+        self._telemetry_topic: str = str(self.get_parameter('telemetry_topic').value)
 
         # MAVSDK state
         self._system = None
@@ -80,7 +82,7 @@ class TelemetryNode(Node):
         # Publisher
         self._telemetry_pub = self.create_publisher(
             DroneTelemetry,
-            '/drone/telemetry',
+            self._telemetry_topic,
             telemetry_qos
         )
 
@@ -97,8 +99,8 @@ class TelemetryNode(Node):
         self._start_mavsdk_connection()
 
         self.get_logger().info(
-            f'Telemetry node initialized: url={self._connection_url}, '
-            f'rate={self._publish_rate}Hz'
+            f'Telemetry node initialized: topic={self._telemetry_topic}, '
+            f'url={self._connection_url}, rate={self._publish_rate}Hz'
         )
 
     def _start_mavsdk_connection(self) -> None:

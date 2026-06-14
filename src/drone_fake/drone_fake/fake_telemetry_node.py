@@ -38,6 +38,7 @@ class FakeTelemetryNode(Node):
         self.declare_parameter('flight_mode', 'HOLD')
         self.declare_parameter('gps_satellites', 12)
         self.declare_parameter('simulate_gps_noise', True)
+        self.declare_parameter('telemetry_topic', '/drone/telemetry')
 
         # Read parameters
         self._publish_rate: float = self.get_parameter('publish_rate').value
@@ -52,6 +53,7 @@ class FakeTelemetryNode(Node):
         self._flight_mode: str = self.get_parameter('flight_mode').value
         self._gps_satellites: int = self.get_parameter('gps_satellites').value
         self._simulate_gps_noise: bool = self.get_parameter('simulate_gps_noise').value
+        self._telemetry_topic: str = str(self.get_parameter('telemetry_topic').value)
 
         # State
         self._start_time: float = time.time()
@@ -73,7 +75,7 @@ class FakeTelemetryNode(Node):
         # Publisher
         self._telemetry_pub = self.create_publisher(
             DroneTelemetry,
-            '/drone/telemetry',
+            self._telemetry_topic,
             telemetry_qos
         )
 
@@ -89,9 +91,9 @@ class FakeTelemetryNode(Node):
             self._current_altitude = self._flight_altitude
 
         self.get_logger().info(
-            f'Fake telemetry node initialized: rate={self._publish_rate}Hz, '
-            f'armed={self._simulate_armed}, flying={self._simulate_flying}, '
-            f'battery={self._initial_battery}%'
+            f'Fake telemetry node initialized: topic={self._telemetry_topic}, '
+            f'rate={self._publish_rate}Hz, armed={self._simulate_armed}, '
+            f'flying={self._simulate_flying}, battery={self._initial_battery}%'
         )
 
     def _publish_telemetry(self) -> None:

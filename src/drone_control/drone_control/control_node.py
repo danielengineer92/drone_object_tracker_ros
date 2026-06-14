@@ -83,6 +83,9 @@ class ControlNode(Node):
         self.declare_parameter("control_rate", 20.0)
         self.declare_parameter("target_timeout", 1.0)
         self.declare_parameter("telemetry_timeout", 2.0)
+        self.declare_parameter("target_error_topic", "/target_error")
+        self.declare_parameter("telemetry_topic", "/drone/telemetry")
+        self.declare_parameter("control_command_topic", "/control_command")
 
         self.autonomous_enabled = bool(self.get_parameter("autonomous_enabled").value)
 
@@ -111,6 +114,9 @@ class ControlNode(Node):
         self.control_rate = float(self.get_parameter("control_rate").value)
         self.target_timeout = float(self.get_parameter("target_timeout").value)
         self.telemetry_timeout = float(self.get_parameter("telemetry_timeout").value)
+        self.target_error_topic = str(self.get_parameter("target_error_topic").value)
+        self.telemetry_topic = str(self.get_parameter("telemetry_topic").value)
+        self.control_command_topic = str(self.get_parameter("control_command_topic").value)
 
         self.validate_parameters()
         self.control_period = 1.0 / self.control_rate
@@ -136,21 +142,21 @@ class ControlNode(Node):
 
         self.error_sub = self.create_subscription(
             TargetError,
-            "target_error",
+            self.target_error_topic,
             self.target_error_callback,
             qos,
         )
 
         self.telemetry_sub = self.create_subscription(
             DroneTelemetry,
-            "drone/telemetry",
+            self.telemetry_topic,
             self.telemetry_callback,
             qos,
         )
 
         self.command_pub = self.create_publisher(
             ControlCommand,
-            "control_command",
+            self.control_command_topic,
             qos,
         )
 
@@ -163,7 +169,10 @@ class ControlNode(Node):
         self.add_on_set_parameters_callback(self.on_parameter_change)
 
         self.get_logger().warning(
-            f"Control node started | autonomous_enabled={self.autonomous_enabled}, "
+            f"Control node started | target_error_topic={self.target_error_topic}, "
+            f"telemetry_topic={self.telemetry_topic}, "
+            f"control_command_topic={self.control_command_topic}, "
+            f"autonomous_enabled={self.autonomous_enabled}, "
             "mode=YAW_ONLY, forward=0, strafe=0"
         )
 

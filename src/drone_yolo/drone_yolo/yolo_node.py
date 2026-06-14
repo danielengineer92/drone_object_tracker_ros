@@ -9,7 +9,7 @@ Publishes:
 """
 
 import time
-from typing import List
+from typing import List, Optional
 
 import cv2
 import numpy as np
@@ -35,6 +35,9 @@ class YoloNode(Node):
         self.declare_parameter("half_precision", False)
         self.declare_parameter("verbose", False)
         self.declare_parameter("target_class", "")
+        self.declare_parameter("image_topic", "/camera/image_raw")
+        self.declare_parameter("detections_topic", "/detections")
+        self.declare_parameter("process_every_n_frames", 1)
 
         self.model_path = self.get_parameter("model_path").value
         self.confidence_threshold = self.get_parameter("confidence_threshold").value
@@ -43,8 +46,13 @@ class YoloNode(Node):
         self.input_size = self.get_parameter("input_size").value
         self.max_detections = self.get_parameter("max_detections").value
         self.half_precision = self.get_parameter("half_precision").value
-        self.verbose = self.get_parameter("verbose").value
-        self.target_class = self.get_parameter("target_class").value.strip().lower()
+        self.verbose = bool(self.get_parameter("verbose").value)
+        self.target_class = str(self.get_parameter("target_class").value).strip().lower()
+        self.image_topic = str(self.get_parameter("image_topic").value)
+        self.detections_topic = str(self.get_parameter("detections_topic").value)
+        self.process_every_n_frames = max(1, int(self.get_parameter("process_every_n_frames").value))
+        self._received_frames = 0
+        self._target_class_ids: Optional[List[int]] = None
 
         self.bridge = CvBridge()
         self.model = None
@@ -54,6 +62,7 @@ class YoloNode(Node):
         self.total_inference_time = 0.0
 
         self._load_model()
+        self._target_class_ids = self._resolve_target_class_ids()
 
         image_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -69,23 +78,25 @@ class YoloNode(Node):
 
         self.image_sub = self.create_subscription(
             Image,
-            "/camera/image_raw",
+            self.image_topic,
             self._image_callback,
             image_qos,
         )
 
         self.detection_pub = self.create_publisher(
             DetectionArray,
-            "/detections",
+            self.detections_topic,
             detection_qos,
         )
 
         self.report_timer = self.create_timer(10.0, self._report_performance)
 
         self.get_logger().info(
-            f"YOLO node initialized | model={self.model_path}, "
+            f"YOLO node initialized | image_topic={self.image_topic}, "
+            f"detections_topic={self.detections_topic}, model={self.model_path}, "
             f"confidence={self.confidence_threshold}, device={self.device}, "
-            f"target_class='{self.target_class or 'all'}'"
+            f"target_class='{self.target_class or 'all'}', "
+            f"process_every_n_frames={self.process_every_n_frames}"
         )
 
     def _load_model(self) -> None:
@@ -120,8 +131,42 @@ class YoloNode(Node):
             self.get_logger().error(f"Failed to load YOLO model: {exc}")
             self.model_loaded = False
 
+
+    def _resolve_target_class_ids(self) -> Optional[List[int]]:
+        """Resolve the configured target class name to Ultralytics class ids.
+
+        Passing class ids into model.predict lets YOLO skip unused classes and
+        reduces post-processing work on the Raspberry Pi. We still keep the
+        name filter in _image_callback as a safety check.
+        """
+        if not self.target_class or not self.model_loaded or self.model is None:
+            return None
+
+        names = getattr(self.model, "names", {})
+        matches = [
+            int(class_id)
+            for class_id, class_name in names.items()
+            if str(class_name).strip().lower() == self.target_class
+        ]
+
+        if not matches:
+            self.get_logger().warning(
+                f"target_class={self.target_class!r} was not found in model names; "
+                "YOLO will run all classes and filter by name afterward."
+            )
+            return None
+
+        self.get_logger().info(
+            f"YOLO class filter active: {self.target_class} -> class ids {matches}"
+        )
+        return matches
+
     def _image_callback(self, msg: Image) -> None:
         if not self.model_loaded:
+            return
+
+        self._received_frames += 1
+        if self._received_frames % self.process_every_n_frames != 0:
             return
 
         try:
@@ -130,16 +175,19 @@ class YoloNode(Node):
 
             start_time = time.time()
 
-            results = self.model.predict(
-                frame,
-                conf=self.confidence_threshold,
-                iou=self.iou_threshold,
-                device=self.device,
-                half=self.half_precision,
-                verbose=self.verbose,
-                imgsz=self.input_size,
-                max_det=self.max_detections,
-            )
+            predict_kwargs = {
+                "conf": self.confidence_threshold,
+                "iou": self.iou_threshold,
+                "device": self.device,
+                "half": self.half_precision,
+                "verbose": self.verbose,
+                "imgsz": self.input_size,
+                "max_det": self.max_detections,
+            }
+            if self._target_class_ids is not None:
+                predict_kwargs["classes"] = self._target_class_ids
+
+            results = self.model.predict(frame, **predict_kwargs)
 
             inference_time = time.time() - start_time
             self.total_inference_time += inference_time

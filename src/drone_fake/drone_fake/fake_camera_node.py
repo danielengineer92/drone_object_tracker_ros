@@ -35,6 +35,8 @@ class FakeCameraNode(Node):
         self.declare_parameter('motion_speed', 1.0)
         self.declare_parameter('add_noise', True)
         self.declare_parameter('noise_level', 10)
+        self.declare_parameter('image_topic', '/camera/image_raw')
+        self.declare_parameter('frame_id', 'camera_optical_frame')
 
         # Read parameters
         self._frame_width: int = self.get_parameter('frame_width').value
@@ -45,6 +47,8 @@ class FakeCameraNode(Node):
         self._motion_speed: float = self.get_parameter('motion_speed').value
         self._add_noise: bool = self.get_parameter('add_noise').value
         self._noise_level: int = self.get_parameter('noise_level').value
+        self._image_topic: str = str(self.get_parameter('image_topic').value)
+        self._frame_id: str = str(self.get_parameter('frame_id').value)
 
         # State
         self._bridge: CvBridge = CvBridge()
@@ -59,7 +63,7 @@ class FakeCameraNode(Node):
         )
 
         # Publisher
-        self._image_pub = self.create_publisher(Image, '/camera/image_raw', image_qos)
+        self._image_pub = self.create_publisher(Image, self._image_topic, image_qos)
 
         # Timer for frame generation
         timer_period: float = 1.0 / self._fps
@@ -71,8 +75,9 @@ class FakeCameraNode(Node):
         self._fps_count: int = 0
 
         self.get_logger().info(
-            f'Fake camera node initialized: {self._frame_width}x{self._frame_height} @ '
-            f'{self._fps}fps, pattern={self._motion_pattern}'
+            f'Fake camera node initialized: topic={self._image_topic}, '
+            f'{self._frame_width}x{self._frame_height} @ {self._fps}fps, '
+            f'pattern={self._motion_pattern}'
         )
 
     def _get_target_position(self, t: float) -> tuple[int, int]:
@@ -221,7 +226,7 @@ class FakeCameraNode(Node):
         # Publish
         header = Header()
         header.stamp = self.get_clock().now().to_msg()
-        header.frame_id = 'camera_optical_frame'
+        header.frame_id = self._frame_id
 
         img_msg: Image = self._bridge.cv2_to_imgmsg(frame, encoding='bgr8')
         img_msg.header = header

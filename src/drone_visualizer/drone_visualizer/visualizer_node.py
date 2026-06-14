@@ -5,6 +5,7 @@ This node displays the camera feed with overlaid detection bounding boxes,
 target lock status, tracking error indicators, and telemetry information.
 """
 
+import os
 import time
 from typing import Optional, List
 
@@ -36,6 +37,11 @@ class VisualizerNode(Node):
         self.declare_parameter('show_control', True)
         self.declare_parameter('display_fps', 30.0)
         self.declare_parameter('headless', False)
+        self.declare_parameter('image_topic', '/camera/image_raw')
+        self.declare_parameter('detections_topic', '/detections')
+        self.declare_parameter('target_error_topic', '/target_error')
+        self.declare_parameter('telemetry_topic', '/drone/telemetry')
+        self.declare_parameter('control_command_topic', '/control_command')
 
         # Read parameters
         self._window_name: str = self.get_parameter('window_name').value
@@ -45,8 +51,20 @@ class VisualizerNode(Node):
         self._show_tracking: bool = self.get_parameter('show_tracking').value
         self._show_telemetry: bool = self.get_parameter('show_telemetry').value
         self._show_control: bool = self.get_parameter('show_control').value
-        self._display_fps: float = self.get_parameter('display_fps').value
-        self._headless: bool = self.get_parameter('headless').value
+        self._display_fps: float = float(self.get_parameter('display_fps').value)
+        requested_headless: bool = bool(self.get_parameter('headless').value)
+        display_available = bool(os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY'))
+        self._headless: bool = requested_headless or not display_available
+        self._image_topic: str = str(self.get_parameter('image_topic').value)
+        self._detections_topic: str = str(self.get_parameter('detections_topic').value)
+        self._target_error_topic: str = str(self.get_parameter('target_error_topic').value)
+        self._telemetry_topic: str = str(self.get_parameter('telemetry_topic').value)
+        self._control_command_topic: str = str(self.get_parameter('control_command_topic').value)
+
+        if not requested_headless and not display_available:
+            self.get_logger().warning(
+                'No DISPLAY/WAYLAND_DISPLAY found; forcing visualizer headless=True.'
+            )
 
         # State
         self._bridge: CvBridge = CvBridge()
@@ -85,50 +103,55 @@ class VisualizerNode(Node):
         # Subscribers
         self._image_sub = self.create_subscription(
             Image,
-            '/camera/image_raw',
+            self._image_topic,
             self._image_callback,
             image_qos
         )
 
         self._detection_sub = self.create_subscription(
             DetectionArray,
-            '/detections',
+            self._detections_topic,
             self._detection_callback,
             reliable_qos
         )
 
         self._target_error_sub = self.create_subscription(
             TargetError,
-            '/target_error',
+            self._target_error_topic,
             self._target_error_callback,
             reliable_qos
         )
 
         self._telemetry_sub = self.create_subscription(
             DroneTelemetry,
-            '/drone/telemetry',
+            self._telemetry_topic,
             self._telemetry_callback,
             reliable_qos
         )
 
         self._command_sub = self.create_subscription(
             ControlCommand,
-            '/control_command',
+            self._control_command_topic,
             self._command_callback,
             reliable_qos
         )
 
-        # Display timer
-        display_period = 1.0 / self._display_fps
-        self._display_timer = self.create_timer(display_period, self._display_callback)
-
+        # Display timer. In headless mode, avoid all OpenCV GUI calls and
+        # avoid spending Pi CPU drawing frames that nobody can see.
+        self._display_timer = None
         if not self._headless:
+            display_period = 1.0 / self._display_fps
+            self._display_timer = self.create_timer(display_period, self._display_callback)
             cv2.namedWindow(self._window_name, cv2.WINDOW_NORMAL)
             cv2.resizeWindow(self._window_name, self._display_width, self._display_height)
 
         self.get_logger().info(
-            f'Visualizer node initialized: {self._display_width}x{self._display_height}, '
-            f'headless={self._headless}'
+            f'Visualizer node initialized: image_topic={self._image_topic}, '
+            f'detections_topic={self._detections_topic}, '
+            f'target_error_topic={self._target_error_topic}, '
+            f'telemetry_topic={self._telemetry_topic}, '
+            f'control_command_topic={self._control_command_topic}, '
+            f'{self._display_width}x{self._display_height}, headless={self._headless}'
         )
 
     def _image_callback(self, msg: Image) -> None:

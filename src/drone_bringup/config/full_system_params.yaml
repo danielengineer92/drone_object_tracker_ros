@@ -2,6 +2,9 @@
 
 camera_node:
   ros__parameters:
+    image_topic: "/camera/image_raw"
+    frame_id: "camera_optical_frame"
+    buffer_size: 1
     camera_index: 0
     frame_width: 640
     frame_height: 480
@@ -12,6 +15,9 @@ camera_node:
 
 yolo_node:
   ros__parameters:
+    detections_topic: "/detections"
+    image_topic: "/camera/image_raw"
+    process_every_n_frames: 1
     model_path: "yolov8n.pt"
     confidence_threshold: 0.5
     iou_threshold: 0.45
@@ -24,6 +30,8 @@ yolo_node:
 
 tracker_node:
   ros__parameters:
+    detections_topic: "/detections"
+    target_error_topic: "/target_error"
     target_class: "person"
     min_confidence: 0.5
     detection_timeout: 1.5
@@ -36,6 +44,7 @@ tracker_node:
 
 telemetry_node:
   ros__parameters:
+    telemetry_topic: "/drone/telemetry"
     connection_url: "serial:///dev/ttyACM0:57600"
     publish_rate: 10.0
     reconnect_interval: 5.0
@@ -43,6 +52,9 @@ telemetry_node:
 
 control_node:
   ros__parameters:
+    target_error_topic: "/target_error"
+    telemetry_topic: "/drone/telemetry"
+    control_command_topic: "/control_command"
     # ============================================================
     # SAFETY — leave autonomous_enabled FALSE until bench-tested
     # ============================================================
@@ -99,6 +111,11 @@ control_node:
 
 visualizer_node:
   ros__parameters:
+    image_topic: "/camera/image_raw"
+    detections_topic: "/detections"
+    target_error_topic: "/target_error"
+    telemetry_topic: "/drone/telemetry"
+    control_command_topic: "/control_command"
     window_name: "Drone Vision System (FULL SYSTEM)"
     display_width: 960
     display_height: 720
@@ -107,4 +124,4 @@ visualizer_node:
     show_telemetry: true
     show_control: true
     display_fps: 30.0
-    headless: false
+    headless: true
