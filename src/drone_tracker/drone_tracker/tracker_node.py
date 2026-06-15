@@ -6,6 +6,12 @@ Subscribes:
 
 Publishes:
     /target_error
+
+Behavior:
+    - Filters detections by target class, confidence, and area.
+    - Requires multiple consecutive detections before declaring LOCKED.
+    - Uses COASTING state to survive short YOLO dropouts.
+    - Publishes smooth normalized target error for the control node.
 """
 
 import time
@@ -22,7 +28,9 @@ from drone_diagnostics.node_diagnostics import NodeDiagnostics
 
 class TrackingState(Enum):
     SEARCHING = "SEARCHING"
+    ACQUIRING = "ACQUIRING"
     LOCKED = "LOCKED"
+    COASTING = "COASTING"
     LOST = "LOST"
 
 
@@ -47,27 +55,36 @@ class TrackerNode(Node):
     def __init__(self) -> None:
         super().__init__("tracker_node")
 
+        # Core tracking parameters
         self.declare_parameter("target_class", "person")
         self.declare_parameter("min_confidence", 0.4)
-        self.declare_parameter("detection_timeout", 2.0)
         self.declare_parameter("reacquisition_timeout", 5.0)
         self.declare_parameter("smoothing_alpha", 0.4)
         self.declare_parameter("target_area_min", 0.001)
         self.declare_parameter("target_area_max", 0.8)
         self.declare_parameter("publish_rate", 30.0)
         self.declare_parameter("proximity_threshold", 0.15)
+
+        # Debounce / anti-bounce parameters
+        self.declare_parameter("lock_confirm_frames", 3)
+        self.declare_parameter("coast_timeout", 0.75)
+
+        # Topics
         self.declare_parameter("detections_topic", "/detections")
         self.declare_parameter("target_error_topic", "/target_error")
 
         self.target_class = str(self.get_parameter("target_class").value).strip().lower()
-        self.min_confidence = self.get_parameter("min_confidence").value
-        self.detection_timeout = self.get_parameter("detection_timeout").value
-        self.reacquisition_timeout = self.get_parameter("reacquisition_timeout").value
-        self.smoothing_alpha = self.get_parameter("smoothing_alpha").value
-        self.target_area_min = self.get_parameter("target_area_min").value
-        self.target_area_max = self.get_parameter("target_area_max").value
-        self.publish_rate = self.get_parameter("publish_rate").value
-        self.proximity_threshold = self.get_parameter("proximity_threshold").value
+        self.min_confidence = float(self.get_parameter("min_confidence").value)
+        self.reacquisition_timeout = float(self.get_parameter("reacquisition_timeout").value)
+        self.smoothing_alpha = float(self.get_parameter("smoothing_alpha").value)
+        self.target_area_min = float(self.get_parameter("target_area_min").value)
+        self.target_area_max = float(self.get_parameter("target_area_max").value)
+        self.publish_rate = float(self.get_parameter("publish_rate").value)
+        self.proximity_threshold = float(self.get_parameter("proximity_threshold").value)
+
+        self.lock_confirm_frames = int(self.get_parameter("lock_confirm_frames").value)
+        self.coast_timeout = float(self.get_parameter("coast_timeout").value)
+
         self.detections_topic = str(self.get_parameter("detections_topic").value)
         self.target_error_topic = str(self.get_parameter("target_error_topic").value)
 
@@ -78,6 +95,9 @@ class TrackerNode(Node):
         self.last_target_center_y = 0.5
         self.last_target_confidence = 0.0
         self.last_target_area = 0.0
+
+        self.lock_candidate_count = 0
+
         self.detection_message_count = 0
         self.target_error_publish_count = 0
         self.last_detection_array_count = 0
@@ -111,7 +131,7 @@ class TrackerNode(Node):
         )
 
         self.publish_timer = self.create_timer(
-            1.0 / float(self.publish_rate),
+            1.0 / self.publish_rate,
             self.publish_error,
         )
 
@@ -127,24 +147,38 @@ class TrackerNode(Node):
         self.get_logger().info(
             f"Tracker node started | detections_topic={self.detections_topic}, "
             f"target_error_topic={self.target_error_topic}, "
-            f"target_class={self.target_class}, min_confidence={self.min_confidence}, "
-            f"timeout={self.detection_timeout}s"
+            f"target_class={self.target_class}, "
+            f"min_confidence={self.min_confidence}, "
+            f"lock_confirm_frames={self.lock_confirm_frames}, "
+            f"coast_timeout={self.coast_timeout}s, "
+            f"reacquisition_timeout={self.reacquisition_timeout}s"
         )
 
     def detection_callback(self, msg: DetectionArray) -> None:
         current_time = time.time()
         self.detection_message_count += 1
         self.last_detection_array_count = msg.count
+
         self.diagnostics.mark_received(
             self.detections_topic,
             summary=f"messages={self.detection_message_count}, detections={msg.count}",
         )
 
+        best_detection = self.select_best_detection(msg)
+
+        if best_detection is not None:
+            self.handle_target_seen(best_detection, current_time)
+        else:
+            self.handle_target_missing(current_time)
+
+    def select_best_detection(self, msg: DetectionArray) -> Optional[Detection]:
         best_detection: Optional[Detection] = None
         best_score = -999.0
 
         for detection in msg.detections:
-            if detection.class_name.strip().lower() != self.target_class:
+            class_name = detection.class_name.strip().lower()
+
+            if class_name != self.target_class:
                 continue
 
             if detection.confidence < self.min_confidence:
@@ -155,9 +189,10 @@ class TrackerNode(Node):
             if area < self.target_area_min or area > self.target_area_max:
                 continue
 
-            score = detection.confidence
+            score = float(detection.confidence)
 
-            if self.state in (TrackingState.LOCKED, TrackingState.LOST):
+            # Prefer detections near the previous locked target.
+            if self.state in (TrackingState.LOCKED, TrackingState.COASTING, TrackingState.LOST):
                 dx = detection.center_x - self.last_target_center_x
                 dy = detection.center_y - self.last_target_center_y
                 distance = (dx * dx + dy * dy) ** 0.5
@@ -171,57 +206,97 @@ class TrackerNode(Node):
                 best_score = score
                 best_detection = detection
 
-        if best_detection is not None:
-            self.last_detection_time = current_time
-            self.last_target_center_x = best_detection.center_x
-            self.last_target_center_y = best_detection.center_y
-            self.last_target_confidence = best_detection.confidence
-            self.last_target_area = best_detection.width * best_detection.height
+        return best_detection
 
-            if self.state != TrackingState.LOCKED:
-                self.get_logger().info(
-                    f"Target acquired: {self.target_class} "
-                    f"confidence={best_detection.confidence:.2f}"
-                )
+    def handle_target_seen(self, detection: Detection, current_time: float) -> None:
+        previous_state = self.state
 
-            self.state = TrackingState.LOCKED
-            return
+        self.last_detection_time = current_time
+        self.last_target_center_x = float(detection.center_x)
+        self.last_target_center_y = float(detection.center_y)
+        self.last_target_confidence = float(detection.confidence)
+        self.last_target_area = float(detection.width * detection.height)
 
-        time_since_last = current_time - self.last_detection_time
+        # Require multiple consecutive detections before declaring a fresh lock.
+        if self.state in (TrackingState.SEARCHING, TrackingState.LOST, TrackingState.ACQUIRING):
+            self.lock_candidate_count += 1
+
+            if self.lock_candidate_count < self.lock_confirm_frames:
+                self.state = TrackingState.ACQUIRING
+
+                if previous_state != TrackingState.ACQUIRING:
+                    self.get_logger().info(
+                        f"Target candidate found: {self.target_class} "
+                        f"confidence={detection.confidence:.2f} "
+                        f"confirm={self.lock_candidate_count}/{self.lock_confirm_frames}"
+                    )
+                return
+
+        self.lock_candidate_count = self.lock_confirm_frames
+        self.state = TrackingState.LOCKED
+
+        if previous_state != TrackingState.LOCKED:
+            self.get_logger().info(
+                f"Target locked: {self.target_class} "
+                f"confidence={detection.confidence:.2f}"
+            )
+
+    def handle_target_missing(self, current_time: float) -> None:
+        if self.last_detection_time > 0.0:
+            time_since_last = current_time - self.last_detection_time
+        else:
+            time_since_last = 999.0
 
         if self.state == TrackingState.LOCKED:
-            if time_since_last > self.detection_timeout:
-                self.state = TrackingState.LOST
-                self.get_logger().warning("Target lost.")
+            if time_since_last <= self.coast_timeout:
+                self.state = TrackingState.COASTING
+            else:
+                self.set_lost("Target lost.")
+
+        elif self.state == TrackingState.COASTING:
+            if time_since_last > self.coast_timeout:
+                self.set_lost("Target lost after coasting.")
+
+        elif self.state == TrackingState.ACQUIRING:
+            # One bad frame during acquire means we did not really lock yet.
+            self.lock_candidate_count = 0
+            self.state = TrackingState.SEARCHING
 
         elif self.state == TrackingState.LOST:
             if time_since_last > self.reacquisition_timeout:
                 self.state = TrackingState.SEARCHING
+                self.lock_candidate_count = 0
                 self.error_x_filter.reset()
                 self.error_y_filter.reset()
                 self.get_logger().info("Reacquisition timeout. Searching again.")
 
+    def set_lost(self, reason: str) -> None:
+        if self.state != TrackingState.LOST:
+            self.get_logger().warning(reason)
+
+        self.state = TrackingState.LOST
+        self.lock_candidate_count = 0
+        self.error_x_filter.reset()
+        self.error_y_filter.reset()
+
     def publish_error(self) -> None:
         current_time = time.time()
 
-        # Do not keep publishing a fresh LOCKED error if detections stop arriving.
-        # This protects the controller from chasing stale target coordinates.
+        # Timer-side stale protection.
+        # If detections stop completely, do not keep publishing a fake fresh target.
         if (
-            self.state == TrackingState.LOCKED
+            self.state in (TrackingState.LOCKED, TrackingState.COASTING)
             and self.last_detection_time > 0.0
-            and current_time - self.last_detection_time > self.detection_timeout
+            and current_time - self.last_detection_time > self.coast_timeout
         ):
-            self.state = TrackingState.LOST
-            self.error_x_filter.reset()
-            self.error_y_filter.reset()
-            self.get_logger().warning("Target lost: detection stream timed out.")
+            self.set_lost("Target lost: detection stream timed out.")
 
         msg = TargetError()
         msg.stamp = self.get_clock().now().to_msg()
         msg.target_class = self.target_class
         msg.tracking_state = self.state.value
 
-        if self.state == TrackingState.LOCKED:
+        if self.state in (TrackingState.LOCKED, TrackingState.COASTING):
             raw_error_x = self.last_target_center_x - 0.5
             raw_error_y = self.last_target_center_y - 0.5
 
@@ -233,7 +308,7 @@ class TrackerNode(Node):
             msg.target_visible = True
             msg.target_confidence = float(self.last_target_confidence)
             msg.target_area = float(self.last_target_area)
-            msg.time_since_last_seen = 0.0
+            msg.time_since_last_seen = float(current_time - self.last_detection_time)
 
         else:
             msg.error_x = 0.0
@@ -249,12 +324,22 @@ class TrackerNode(Node):
 
         self.error_pub.publish(msg)
         self.target_error_publish_count += 1
+
         self.diagnostics.mark_published(
             self.target_error_topic,
-            summary=f"messages={self.target_error_publish_count}, state={self.state.value}, visible={msg.target_visible}",
+            summary=(
+                f"messages={self.target_error_publish_count}, "
+                f"state={self.state.value}, "
+                f"visible={msg.target_visible}"
+            ),
         )
 
     def report_status(self) -> None:
+        if self.last_detection_time > 0.0:
+            target_age = time.time() - self.last_detection_time
+        else:
+            target_age = -1.0
+
         self.get_logger().info(
             f"Tracker status | state={self.state.value}, "
             f"target={self.target_class}, "
@@ -262,6 +347,8 @@ class TrackerNode(Node):
             f"last_detection_count={self.last_detection_array_count}, "
             f"target_error_messages={self.target_error_publish_count}, "
             f"last_detection_age={self.diagnostics.format_age(self.detections_topic)}, "
+            f"target_age={target_age:.2f}s, "
+            f"lock_candidates={self.lock_candidate_count}/{self.lock_confirm_frames}, "
             f"confidence={self.last_target_confidence:.2f}, "
             f"area={self.last_target_area:.4f}"
         )
