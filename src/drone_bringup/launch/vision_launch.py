@@ -85,11 +85,10 @@ def generate_launch_description() -> LaunchDescription:
         emulate_tty=True,
     )
 
-    # Use fake telemetry since no drone is connected
-    fake_telemetry = Node(
-        package='drone_fake',
-        executable='fake_telemetry_node',
-        name='fake_telemetry_node',
+    telemetry = Node(
+        package='drone_telemetry',
+        executable='telemetry_node',
+        name='telemetry_node',
         parameters=[config_file],
         output='screen',
     )
@@ -122,7 +121,7 @@ def generate_launch_description() -> LaunchDescription:
         yolo,
         tracker,
         control,
-        fake_telemetry,
+        telemetry,
         visualizer,
         health_monitor,
     ])
