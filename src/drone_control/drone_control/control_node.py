@@ -385,9 +385,9 @@ class ControlNode(Node):
 
         if not telemetry.connected:
             return False, STATUS_BLOCKED_DISCONNECTED
-        #Blocked for testing 
-        #if telemetry.battery_remaining_percent < self.min_battery_percent:
-        #    return False, STATUS_BLOCKED_LOW_BATTERY
+         
+        if telemetry.battery_remaining_percent < self.min_battery_percent:
+            return False, STATUS_BLOCKED_LOW_BATTERY
 
         if self.require_gps and not telemetry.health_gps_ok:
             return False, STATUS_BLOCKED_GPS
