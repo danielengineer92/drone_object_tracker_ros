@@ -64,10 +64,10 @@ control_node:
     target_error_topic: "/target_error"
     telemetry_topic: "/drone/telemetry"
     control_command_topic: "/control_command"
-    autonomous_enabled: true     # safe to enable in sim
+    autonomy_enabled: false     # default safe; enable with /autonomy_enable when testing
 
     gain_yaw: 1.0
-    gain_down: 0.4
+    gain_down: 0.4       # reserved; altitude control disabled in yaw-only mode
     gain_forward: 1.0
     gain_right: 1.0
 
@@ -76,12 +76,12 @@ control_node:
 
     max_velocity_forward: 3.0
     max_velocity_right: 3.0
-    max_velocity_down: 1.0
+    max_velocity_down: 1.0      # reserved; output held at 0 in yaw-only mode
     max_yaw_rate: 1.5
 
     max_accel_forward: 2.0
     max_accel_right: 2.0
-    max_accel_down: 1.0
+    max_accel_down: 1.0         # reserved; output held at 0 in yaw-only mode
     max_yaw_accel: 3.0
 
     min_battery_percent: 10.0    # sim batteries don't matter
@@ -117,5 +117,7 @@ health_monitor_node:
     target_error_topic: "/target_error"
     telemetry_topic: "/drone/telemetry"
     control_command_topic: "/control_command"
+    mavsdk_command_status_topic: "/mavsdk_command_status"
+    monitor_mavsdk_command_status: false
     heartbeat_period: 2.0
     stale_seconds: 2.0

@@ -28,6 +28,8 @@ It subscribes to the major pipeline topics:
 - `/target_error`
 - `/drone/telemetry`
 - `/control_command`
+- `/autonomy_enable` (operator command topic; use `ros2 topic echo /autonomy_enable` when testing the control gate)
+- `/mavsdk_command_status` in full-system mode (MAVSDK/PX4 command bridge status)
 
 It is included automatically in:
 
@@ -78,7 +80,12 @@ tracker_node OUT /target_error fresh
 
 control_node IN /target_error fresh
 control_node IN /drone/telemetry fresh
+control_node IN /autonomy_enable when operator toggles autonomy
 control_node OUT /control_command fresh
+
+telemetry_node IN /control_command fresh
+telemetry_node IN /mavsdk_offboard_enable when operator enables actual PX4 command sending
+telemetry_node OUT /mavsdk_command_status fresh
 ```
 
 If one stage is stale, fix the first broken upstream topic before chasing downstream symptoms.

@@ -48,16 +48,16 @@ control_node:
     telemetry_topic: "/drone/telemetry"
     control_command_topic: "/control_command"
     # ============================================================
-    # SAFETY — leave autonomous_enabled FALSE until bench-tested
+    # SAFETY — leave autonomy_enabled FALSE until bench-tested
     # ============================================================
-    autonomous_enabled: false
+    autonomy_enabled: false
 
     # ============================================================
     # Control gains (proportional)
     # error is normalized image coords in [-1, 1] after deadband
     # ============================================================
     gain_yaw: 0.8        # rad/s per unit error_x   -> turn toward target
-    gain_down: 0.3       # m/s   per unit error_y   -> descend if target low in frame
+    gain_down: 0.3       # reserved; altitude control disabled in yaw-only mode
     gain_forward: 1.0    # unused until area-based forward control is added
     gain_right: 1.0      # unused in yaw-only lateral mode
 
@@ -73,7 +73,7 @@ control_node:
     # ============================================================
     max_velocity_forward: 2.0   # m/s
     max_velocity_right: 2.0     # m/s   (effectively unused; strafe held at 0)
-    max_velocity_down: 0.5      # m/s   keep small — this is descent rate
+    max_velocity_down: 0.5      # reserved; output held at 0 in yaw-only mode
     max_yaw_rate: 1.0           # rad/s ~57 deg/s
 
     # ============================================================
@@ -83,7 +83,7 @@ control_node:
     # ============================================================
     max_accel_forward: 1.5      # m/s^2
     max_accel_right: 1.5        # m/s^2
-    max_accel_down: 0.5         # m/s^2  conservative for descent
+    max_accel_down: 0.5         # reserved; output held at 0 in yaw-only mode
     max_yaw_accel: 2.0          # rad/s^2
 
     # ============================================================
@@ -92,7 +92,7 @@ control_node:
     min_battery_percent: 25.0   # block commands below this
     require_gps: false          # set true for outdoor flight
     require_armed: true         # block commands until pilot arms
-    min_altitude_m: 2.0         # altitude floor — blocks further descent
+    min_altitude_m: 2.0         # reserved; altitude output held at 0 in yaw-only mode
 
     # ============================================================
     # Timing
@@ -137,5 +137,7 @@ health_monitor_node:
     target_error_topic: "/target_error"
     telemetry_topic: "/drone/telemetry"
     control_command_topic: "/control_command"
+    mavsdk_command_status_topic: "/mavsdk_command_status"
+    monitor_mavsdk_command_status: false
     heartbeat_period: 2.0
     stale_seconds: 2.0

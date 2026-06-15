@@ -10,9 +10,9 @@ float32 velocity_right
 float32 velocity_down
 float32 yaw_rate
 
-# Whether this command was actually sent to the drone
+# Whether the control node approved this command for the MAVSDK bridge
 bool executed
-string execution_status  # SENT, BLOCKED_SAFETY, BLOCKED_AUTONOMOUS_DISABLED, SIMULATED
+string execution_status  # SENT, BLOCKED_*, IDLE, SIMULATED
 
 # Source tracking error that generated this command
 float32 source_error_x

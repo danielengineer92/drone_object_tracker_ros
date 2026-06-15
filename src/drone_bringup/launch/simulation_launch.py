@@ -97,7 +97,7 @@ def generate_launch_description() -> LaunchDescription:
         target_class_arg,
         LogInfo(msg='=== DRONE VISION SYSTEM - SIMULATION MODE ==='),
         LogInfo(msg='No hardware required. All data is simulated.'),
-        LogInfo(msg='autonomous_enabled is TRUE in simulation only; no real drone is connected.'),
+        LogInfo(msg='autonomy_enabled is FALSE by default. Enable yaw-only sim commands with /autonomy_enable.'),
         fake_camera,
         fake_detection,
         fake_telemetry,

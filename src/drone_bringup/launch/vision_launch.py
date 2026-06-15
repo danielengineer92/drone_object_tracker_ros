@@ -85,8 +85,7 @@ def generate_launch_description() -> LaunchDescription:
         emulate_tty=True,
     )
 
-    # Use fake telemetry since no drone is connected
-    fake_telemetry = Node(
+    telemetry = Node(
         package='drone_fake',
         executable='fake_telemetry_node',
         name='fake_telemetry_node',
@@ -116,13 +115,13 @@ def generate_launch_description() -> LaunchDescription:
         model_path_arg,
         target_class_arg,
         LogInfo(msg='=== DRONE VISION SYSTEM - VISION MODE ==='),
-        LogInfo(msg='Real camera + YOLO detection active. No drone connection.'),
-        LogInfo(msg='autonomous_enabled is FALSE - no flight commands will be sent.'),
+        LogInfo(msg='Real camera + YOLO detection active. Fake telemetry only; no Pixhawk connection.'),
+        LogInfo(msg='autonomy_enabled is FALSE - /control_command stays IDLE until /autonomy_enable true.'),
         camera,
         yolo,
         tracker,
         control,
-        fake_telemetry,
+        telemetry,
         visualizer,
         health_monitor,
     ])

@@ -4,13 +4,15 @@ Control command generation node.
 Subscribes:
     /target_error
     /drone/telemetry
+    /autonomy_enable
 
 Publishes:
     /control_command
 
 This node is intentionally conservative for early flight testing:
+- target tracking is gated by /autonomy_enable
 - horizontal image error drives yaw only
-- strafe and forward velocity are held at zero
+- forward/back, strafe, altitude, and orbit commands are held at zero
 - commands are zeroed unless all safety gates pass
 """
 
@@ -21,6 +23,7 @@ import rclpy
 from rcl_interfaces.msg import SetParametersResult
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from std_msgs.msg import Bool
 
 from drone_interfaces.msg import ControlCommand, DroneTelemetry, TargetError
 from drone_diagnostics.node_diagnostics import NodeDiagnostics
@@ -33,7 +36,7 @@ STATUS_SENT = "SENT"
 STATUS_NO_TARGET = "NO_TARGET_DATA"
 STATUS_TARGET_STALE = "TARGET_DATA_STALE"
 STATUS_TARGET_NOT_VISIBLE = "TARGET_NOT_VISIBLE"
-STATUS_BLOCKED_DISABLED = "BLOCKED_AUTONOMOUS_DISABLED"
+STATUS_BLOCKED_DISABLED = "BLOCKED_AUTONOMY_DISABLED"
 STATUS_BLOCKED_NO_TELEM = "BLOCKED_NO_TELEMETRY"
 STATUS_BLOCKED_TELEM_STALE = "BLOCKED_TELEMETRY_STALE"
 STATUS_BLOCKED_LOW_BATTERY = "BLOCKED_LOW_BATTERY"
@@ -43,7 +46,7 @@ STATUS_BLOCKED_DISCONNECTED = "BLOCKED_NOT_CONNECTED"
 STATUS_ALTITUDE_CLAMPED = "ALTITUDE_FLOOR_CLAMPED"
 
 DYNAMIC_PARAMS = {
-    "autonomous_enabled",
+    "autonomy_enabled", "autonomous_enabled",
     "gain_forward", "gain_right", "gain_down", "gain_yaw",
     "deadband_x", "deadband_y",
     "max_velocity_forward", "max_velocity_right", "max_velocity_down", "max_yaw_rate",
@@ -57,6 +60,9 @@ class ControlNode(Node):
     def __init__(self) -> None:
         super().__init__("control_node")
 
+        # New preferred parameter name is autonomy_enabled.
+        # Keep autonomous_enabled as a backward-compatible alias for older launch/config files.
+        self.declare_parameter("autonomy_enabled", False)
         self.declare_parameter("autonomous_enabled", False)
 
         self.declare_parameter("gain_forward", 1.0)  # reserved for future distance/area control
@@ -87,8 +93,12 @@ class ControlNode(Node):
         self.declare_parameter("target_error_topic", "/target_error")
         self.declare_parameter("telemetry_topic", "/drone/telemetry")
         self.declare_parameter("control_command_topic", "/control_command")
+        self.declare_parameter("autonomy_enable_topic", "/autonomy_enable")
 
-        self.autonomous_enabled = bool(self.get_parameter("autonomous_enabled").value)
+        autonomy_param = bool(self.get_parameter("autonomy_enabled").value)
+        legacy_autonomous_param = bool(self.get_parameter("autonomous_enabled").value)
+        self.autonomy_enabled = autonomy_param or legacy_autonomous_param
+        self.autonomous_enabled = self.autonomy_enabled  # compatibility for existing status/log tooling
 
         self.gain_forward = float(self.get_parameter("gain_forward").value)
         self.gain_right = float(self.get_parameter("gain_right").value)
@@ -118,6 +128,7 @@ class ControlNode(Node):
         self.target_error_topic = str(self.get_parameter("target_error_topic").value)
         self.telemetry_topic = str(self.get_parameter("telemetry_topic").value)
         self.control_command_topic = str(self.get_parameter("control_command_topic").value)
+        self.autonomy_enable_topic = str(self.get_parameter("autonomy_enable_topic").value)
 
         self.validate_parameters()
         self.control_period = 1.0 / self.control_rate
@@ -138,6 +149,8 @@ class ControlNode(Node):
         self.executed_command_count = 0
         self.target_error_count = 0
         self.telemetry_count = 0
+        self.autonomy_enable_count = 0
+        self.target_locked = False
 
         qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
@@ -156,6 +169,13 @@ class ControlNode(Node):
             DroneTelemetry,
             self.telemetry_topic,
             self.telemetry_callback,
+            qos,
+        )
+
+        self.autonomy_sub = self.create_subscription(
+            Bool,
+            self.autonomy_enable_topic,
+            self.autonomy_enable_callback,
             qos,
         )
 
@@ -183,13 +203,14 @@ class ControlNode(Node):
             f"Control node started | target_error_topic={self.target_error_topic}, "
             f"telemetry_topic={self.telemetry_topic}, "
             f"control_command_topic={self.control_command_topic}, "
-            f"autonomous_enabled={self.autonomous_enabled}, "
-            "mode=YAW_ONLY, forward=0, strafe=0"
+            f"autonomy_enable_topic={self.autonomy_enable_topic}, "
+            f"autonomy_enabled={self.autonomy_enabled}, "
+            "mode=YAW_ONLY, forward=0, right=0, down=0"
         )
 
-        if not self.autonomous_enabled:
+        if not self.autonomy_enabled:
             self.get_logger().warning(
-                "AUTONOMOUS MODE DISABLED - output commands will be zeroed."
+                "AUTONOMY DISABLED - publishing IDLE/zero commands until /autonomy_enable is true."
             )
 
     def validate_parameters(self) -> None:
@@ -253,18 +274,68 @@ class ControlNode(Node):
             old_value = getattr(self, param.name, None)
             setattr(self, param.name, param.value)
 
-            if param.name == "autonomous_enabled":
-                if bool(param.value) and not bool(old_value):
-                    self.get_logger().warning("*** AUTONOMOUS MODE ENABLED ***")
-                elif not bool(param.value) and bool(old_value):
-                    self.get_logger().warning("Autonomous mode disabled.")
+            if param.name in ("autonomy_enabled", "autonomous_enabled"):
+                self.set_autonomy_enabled(bool(param.value), source=f"parameter:{param.name}")
 
         return SetParametersResult(successful=True)
+
+    def set_autonomy_enabled(self, enabled: bool, source: str) -> None:
+        enabled = bool(enabled)
+        old_enabled = self.autonomy_enabled
+        self.autonomy_enabled = enabled
+        self.autonomous_enabled = enabled  # compatibility alias
+
+        if enabled and not old_enabled:
+            self.get_logger().warning(f"*** AUTONOMY ENABLED by {source} ***")
+        elif not enabled and old_enabled:
+            self.get_logger().warning(f"Autonomy disabled by {source}; publishing IDLE/zero commands.")
+
+        if not enabled:
+            self.last_command_forward = 0.0
+            self.last_command_right = 0.0
+            self.last_command_down = 0.0
+            self.last_command_yaw = 0.0
+
+            # Push a zero command immediately on disable instead of waiting for
+            # the next control timer tick. During __init__, command_pub does not
+            # exist yet, so guard this for startup safety.
+            if hasattr(self, "command_pub"):
+                source_error_x = 0.0
+                source_error_y = 0.0
+                if self.last_target_error is not None:
+                    source_error_x = float(self.last_target_error.error_x)
+                    source_error_y = float(self.last_target_error.error_y)
+                self.publish_idle(
+                    STATUS_BLOCKED_DISABLED,
+                    source_error_x=source_error_x,
+                    source_error_y=source_error_y,
+                )
+
+    def autonomy_enable_callback(self, msg: Bool) -> None:
+        self.autonomy_enable_count += 1
+        self.set_autonomy_enabled(bool(msg.data), source=self.autonomy_enable_topic)
+        self.diagnostics.mark_received(
+            self.autonomy_enable_topic,
+            summary=f"messages={self.autonomy_enable_count}, enabled={self.autonomy_enabled}",
+        )
 
     def target_error_callback(self, msg: TargetError) -> None:
         self.last_target_error = msg
         self.last_target_error_time = time.time()
         self.target_error_count += 1
+
+        is_locked = bool(msg.target_visible and msg.tracking_state == "LOCKED")
+        if is_locked and not self.target_locked:
+            self.get_logger().info(
+                f"Target acquired by control node | class={msg.target_class}, "
+                f"confidence={msg.target_confidence:.2f}, error_x={msg.error_x:+.3f}, error_y={msg.error_y:+.3f}"
+            )
+        elif not is_locked and self.target_locked:
+            self.get_logger().warning(
+                f"Target lost by control node | state={msg.tracking_state}, visible={msg.target_visible}"
+            )
+        self.target_locked = is_locked
+
         self.diagnostics.mark_received(
             self.target_error_topic,
             summary=f"messages={self.target_error_count}, state={msg.tracking_state}, visible={msg.target_visible}",
@@ -303,9 +374,6 @@ class ControlNode(Node):
         return max(min_value, min(value, max_value))
 
     def check_safety(self, current_time: float) -> tuple[bool, str]:
-        if not self.autonomous_enabled:
-            return False, STATUS_BLOCKED_DISABLED
-
         if self.last_telemetry is None:
             return False, STATUS_BLOCKED_NO_TELEM
 
@@ -388,12 +456,25 @@ class ControlNode(Node):
 
         target_age = current_time - self.last_target_error_time
         if target_age > self.target_timeout:
+            if self.target_locked:
+                self.get_logger().warning(
+                    f"Target lost by control node | target_error stale for {target_age:.2f}s"
+                )
+                self.target_locked = False
             self.publish_idle(f"{STATUS_TARGET_STALE} ({target_age:.2f}s)")
             return
 
         target = self.last_target_error
 
-        if not target.target_visible:
+        if not self.autonomy_enabled:
+            self.publish_idle(
+                STATUS_BLOCKED_DISABLED,
+                source_error_x=target.error_x,
+                source_error_y=target.error_y,
+            )
+            return
+
+        if not (target.target_visible and target.tracking_state == "LOCKED"):
             self.publish_idle(
                 STATUS_TARGET_NOT_VISIBLE,
                 source_error_x=target.error_x,
@@ -402,61 +483,24 @@ class ControlNode(Node):
             return
 
         error_x = self.apply_deadband(float(target.error_x), self.deadband_x)
-        error_y = self.apply_deadband(float(target.error_y), self.deadband_y)
 
-        # Conservative first-flight mode:
-        # target horizontal offset -> yaw only, no strafe
-        # target vertical offset -> slow up/down command
-        # forward is held at 0 until distance/area control is intentionally added
-        desired_forward = 0.0
-        desired_right = 0.0
-        desired_down = error_y * self.gain_down
+        # Current safe autonomy mode is yaw-only:
+        #   error_x < 0 => yaw negative
+        #   error_x > 0 => yaw positive
+        # No forward/back, right/left, altitude, or orbit commands are generated here.
         desired_yaw = error_x * self.gain_yaw
-
-        limited_forward = self.rate_limit_value(
-            desired_forward,
-            self.last_command_forward,
-            self.max_accel_forward * self.control_period,
-        )
-        limited_right = self.rate_limit_value(
-            desired_right,
-            self.last_command_right,
-            self.max_accel_right * self.control_period,
-        )
-        limited_down = self.rate_limit_value(
-            desired_down,
-            self.last_command_down,
-            self.max_accel_down * self.control_period,
-        )
         limited_yaw = self.rate_limit_value(
             desired_yaw,
             self.last_command_yaw,
             self.max_yaw_accel * self.control_period,
         )
-
-        limited_forward = self.clamp(limited_forward, -self.max_velocity_forward, self.max_velocity_forward)
-        limited_right = self.clamp(limited_right, -self.max_velocity_right, self.max_velocity_right)
-        limited_down = self.clamp(limited_down, -self.max_velocity_down, self.max_velocity_down)
         limited_yaw = self.clamp(limited_yaw, -self.max_yaw_rate, self.max_yaw_rate)
 
-        altitude_clamped = False
-        if self.last_telemetry is not None:
-            altitude = float(self.last_telemetry.relative_altitude)
-            if altitude < self.min_altitude_m and limited_down > 0.0:
-                limited_down = 0.0
-                altitude_clamped = True
-
-        # Check safety before committing command state.
-        # Important: when safety blocks output, the rate limiter must remember
-        # the last *actual* output (zero), not the intended blocked command.
-        # Otherwise enabling autonomous later can create a sudden jump.
         safe, reason = self.check_safety(current_time)
-        if altitude_clamped and safe:
-            reason = f"{STATUS_SENT}_{STATUS_ALTITUDE_CLAMPED}"
 
-        output_forward = limited_forward if safe else 0.0
-        output_right = limited_right if safe else 0.0
-        output_down = limited_down if safe else 0.0
+        output_forward = 0.0
+        output_right = 0.0
+        output_down = 0.0
         output_yaw = limited_yaw if safe else 0.0
 
         self.last_command_forward = output_forward
@@ -464,10 +508,15 @@ class ControlNode(Node):
         self.last_command_down = output_down
         self.last_command_yaw = output_yaw
 
-        if not safe:
+        if safe:
             self.get_logger().info(
-                f"blocked={reason} intended fwd={limited_forward:+.3f} "
-                f"right={limited_right:+.3f} down={limited_down:+.3f} yaw={limited_yaw:+.3f}",
+                f"Yaw command | error_x={target.error_x:+.3f}, deadbanded={error_x:+.3f}, "
+                f"yaw_rate={output_yaw:+.3f} rad/s",
+                throttle_duration_sec=0.5,
+            )
+        else:
+            self.get_logger().info(
+                f"blocked={reason} intended yaw={limited_yaw:+.3f} from error_x={target.error_x:+.3f}",
                 throttle_duration_sec=1.0,
             )
 
@@ -493,15 +542,16 @@ class ControlNode(Node):
             self.control_command_topic,
             summary=(
                 f"commands={self.command_count}, executed={self.executed_command_count}, "
-                f"idle={self.idle_command_count}, status={reason}"
+                f"idle={self.idle_command_count}, status={reason}, yaw={output_yaw:+.3f}"
             ),
         )
 
     def report_status(self) -> None:
         self.get_logger().info(
-            f"Control status | autonomous={self.autonomous_enabled}, "
+            f"Control status | autonomy={self.autonomy_enabled}, target_locked={self.target_locked}, "
             f"commands={self.command_count}, executed={self.executed_command_count}, idle={self.idle_command_count}, "
             f"target_msgs={self.target_error_count}, telemetry_msgs={self.telemetry_count}, "
+            f"autonomy_msgs={self.autonomy_enable_count}, "
             f"target_age={self.diagnostics.format_age(self.target_error_topic)}, "
             f"telemetry_age={self.diagnostics.format_age(self.telemetry_topic)}, "
             f"forward={self.last_command_forward:.3f}, "

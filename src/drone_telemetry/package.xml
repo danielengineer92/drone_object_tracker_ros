@@ -3,7 +3,7 @@
 <package format="3">
   <name>drone_telemetry</name>
   <version>1.0.0</version>
-  <description>PX4 telemetry node using MAVSDK for the drone vision system</description>
+  <description>PX4 MAVSDK telemetry and yaw-only command bridge for the drone vision system</description>
   <maintainer email="drone@roche.com">Drone Vision Team</maintainer>
   <license>Apache-2.0</license>
 

@@ -1,10 +1,12 @@
 """
 Launch file for full system mode.
 
-Launches real camera, YOLO detection, tracker, control, real telemetry,
+Launches real camera, YOLO detection, tracker, control, PX4 MAVSDK bridge,
 and visualizer. Requires camera and PX4 drone connection.
 
-WARNING: autonomous_enabled defaults to False. Commands are logged only.
+WARNING: autonomy_enabled defaults to False and mavsdk_offboard_enabled defaults to False.
+Commands stay IDLE until /autonomy_enable is true, and nothing is sent to PX4
+until /mavsdk_offboard_enable is also true.
 """
 
 import os
@@ -125,9 +127,11 @@ def generate_launch_description() -> LaunchDescription:
         target_class_arg,
         connection_url_arg,
         LogInfo(msg='=== DRONE VISION SYSTEM - FULL SYSTEM MODE ==='),
-        LogInfo(msg='Real camera + YOLO + PX4 telemetry active.'),
-        LogInfo(msg='*** autonomous_enabled is FALSE - no flight commands will be sent ***'),
-        LogInfo(msg='To enable autonomous flight (DANGEROUS): ros2 param set /control_node autonomous_enabled true'),
+        LogInfo(msg='Real camera + YOLO + PX4 MAVSDK bridge active.'),
+        LogInfo(msg='*** autonomy_enabled is FALSE - /control_command stays IDLE until /autonomy_enable true ***'),
+        LogInfo(msg='*** mavsdk_offboard_enabled is FALSE - no movement setpoints sent to PX4 until /mavsdk_offboard_enable true ***'),
+        LogInfo(msg="Enable control node yaw autonomy: ros2 topic pub --once /autonomy_enable std_msgs/msg/Bool '{data: true}'"),
+        LogInfo(msg="Enable MAVSDK executor: ros2 topic pub --once /mavsdk_offboard_enable std_msgs/msg/Bool '{data: true}'"),
         camera,
         yolo,
         tracker,

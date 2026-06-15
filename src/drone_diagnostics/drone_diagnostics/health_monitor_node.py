@@ -11,6 +11,7 @@ from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
+from std_msgs.msg import String
 
 from drone_interfaces.msg import ControlCommand, DetectionArray, DroneTelemetry, TargetError
 
@@ -62,6 +63,8 @@ class HealthMonitorNode(Node):
         self.declare_parameter('target_error_topic', '/target_error')
         self.declare_parameter('telemetry_topic', '/drone/telemetry')
         self.declare_parameter('control_command_topic', '/control_command')
+        self.declare_parameter('mavsdk_command_status_topic', '/mavsdk_command_status')
+        self.declare_parameter('monitor_mavsdk_command_status', False)
         self.declare_parameter('heartbeat_period', 2.0)
         self.declare_parameter('stale_seconds', 2.0)
 
@@ -70,6 +73,8 @@ class HealthMonitorNode(Node):
         self._target_error_topic = str(self.get_parameter('target_error_topic').value)
         self._telemetry_topic = str(self.get_parameter('telemetry_topic').value)
         self._control_command_topic = str(self.get_parameter('control_command_topic').value)
+        self._mavsdk_command_status_topic = str(self.get_parameter('mavsdk_command_status_topic').value)
+        self._monitor_mavsdk_command_status = bool(self.get_parameter('monitor_mavsdk_command_status').value)
         self._heartbeat_period = float(self.get_parameter('heartbeat_period').value)
         self._stale_seconds = float(self.get_parameter('stale_seconds').value)
         self._start_time = time.monotonic()
@@ -87,6 +92,10 @@ class HealthMonitorNode(Node):
             self._telemetry_topic: TopicHealth(self._telemetry_topic, 'telemetry', self._stale_seconds),
             self._control_command_topic: TopicHealth(self._control_command_topic, 'control_command', self._stale_seconds),
         }
+        if self._monitor_mavsdk_command_status:
+            self._topics[self._mavsdk_command_status_topic] = TopicHealth(
+                self._mavsdk_command_status_topic, 'mavsdk_command_status', self._stale_seconds
+            )
 
         self._image_sub = self.create_subscription(
             Image,
@@ -118,6 +127,14 @@ class HealthMonitorNode(Node):
             self._command_callback,
             reliable_qos,
         )
+        self._mavsdk_command_status_sub = None
+        if self._monitor_mavsdk_command_status:
+            self._mavsdk_command_status_sub = self.create_subscription(
+                String,
+                self._mavsdk_command_status_topic,
+                self._mavsdk_command_status_callback,
+                reliable_qos,
+            )
 
         self._timer = self.create_timer(self._heartbeat_period, self._report_health)
 
@@ -126,6 +143,7 @@ class HealthMonitorNode(Node):
             f'image={self._image_topic}, detections={self._detections_topic}, '
             f'target_error={self._target_error_topic}, telemetry={self._telemetry_topic}, '
             f'control_command={self._control_command_topic}, '
+            f'mavsdk_command_status={self._mavsdk_command_status_topic if self._monitor_mavsdk_command_status else "disabled"}, '
             f'heartbeat={self._heartbeat_period:.1f}s, stale>{self._stale_seconds:.1f}s'
         )
 
@@ -151,6 +169,10 @@ class HealthMonitorNode(Node):
         self._topics[self._control_command_topic].mark(
             f'type={msg.command_type}, executed={msg.executed}, status={msg.execution_status}'
         )
+
+    def _mavsdk_command_status_callback(self, msg: String) -> None:
+        if self._mavsdk_command_status_topic in self._topics:
+            self._topics[self._mavsdk_command_status_topic].mark(msg.data)
 
     def _report_health(self) -> None:
         now = time.monotonic()

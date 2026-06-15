@@ -15,11 +15,12 @@ setup(
     zip_safe=True,
     maintainer='Drone Vision Team',
     maintainer_email='drone@roche.com',
-    description='PX4 telemetry node using MAVSDK for the drone vision system',
+    description='PX4 MAVSDK telemetry and yaw-only command bridge for the drone vision system',
     license='Apache-2.0',
     entry_points={
         'console_scripts': [
             'telemetry_node = drone_telemetry.telemetry_node:main',
+            'mavsdk_bridge_node = drone_telemetry.telemetry_node:main',
         ],
     },
 )

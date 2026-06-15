@@ -9,20 +9,45 @@ This system provides:
 - YOLO object detection (Ultralytics)
 - Target tracking with error calculation
 - PX4 telemetry via MAVSDK
+- PX4 yaw-only Offboard command bridge via MAVSDK
 - Control command generation with safety gating
 - Real-time visualization with diagnostics
 
 ## Safety
 
-**CRITICAL**: The `autonomous_enabled` parameter defaults to `false`.
-When disabled:
-- No flight commands are sent to the aircraft
-- All intended commands are logged for analysis
-- The system operates in observation-only mode
+**CRITICAL**: `autonomy_enabled` defaults to `false`. The control node also subscribes to `/autonomy_enable` (`std_msgs/Bool`) for explicit operator enable/disable.
 
-To enable autonomous flight (use at your own risk):
+When disabled:
+- `/target_error` is still received and processed
+- `/control_command` is always published as `IDLE`
+- all velocity fields, including `yaw_rate`, are `0.0`
+- no movement command is generated
+
+Enable yaw-only autonomy after bench testing:
+
 ```bash
-ros2 param set /control_node autonomous_enabled true
+ros2 topic pub --once /autonomy_enable std_msgs/msg/Bool "{data: true}"
+```
+
+Disable autonomy:
+
+```bash
+ros2 topic pub --once /autonomy_enable std_msgs/msg/Bool "{data: false}"
+```
+
+Actual PX4 command sending has a **second hard gate**. The MAVSDK bridge will not send Offboard setpoints until this is enabled:
+
+```bash
+ros2 topic pub --once /mavsdk_offboard_enable std_msgs/msg/Bool "{data: true}"
+```
+
+Disable MAVSDK/PX4 command sending:
+
+```bash
+ros2 topic pub --once /mavsdk_offboard_enable std_msgs/msg/Bool "{data: false}"
+```
+
+See `AUTONOMY_GATING.md` and `MAVSDK_COMMAND_BRIDGE.md` for the full test procedure.
 
 Hardware Requirements
 Raspberry Pi 4 (4GB+ recommended)
@@ -80,10 +105,13 @@ ros2 launch drone_bringup full_system_launch.py connection_url:="serial:///dev/t
                                                   │
 ┌──────────────┐                           ┌──────▼───────┐
 │telemetry_node│──────────────────────────▶│ control_node │
-│              │                           │              │
+│ MAVSDK bridge│                           │              │
 │ /drone/      │                           │ /control_    │
-│  telemetry   │                           │  command     │
-└──────────────┘                           └──────────────┘
+│  telemetry   │◀──────────────────────────│  command     │
+│ /mavsdk_     │                           └──────────────┘
+│  command_    │        /mavsdk_offboard_enable gates actual PX4 sending
+│  status      │
+└──────────────┘
 
 ┌──────────────────────────────────────────────────────────┐
 │                    visualizer_node                         │
@@ -97,10 +125,13 @@ ros2 topic list
 ros2 topic echo /target_error
 ros2 topic echo /control_command
 ros2 topic echo /drone/telemetry
+ros2 topic echo /mavsdk_command_status
 
 Check parameters
 ros2 param list /control_node
-ros2 param get /control_node autonomous_enabled
+ros2 param get /control_node autonomy_enabled
+ros2 topic echo /autonomy_enable
+ros2 topic echo /mavsdk_offboard_enable
 
 Node status
 ros2 node list
