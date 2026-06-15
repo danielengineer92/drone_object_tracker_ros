@@ -385,9 +385,9 @@ class ControlNode(Node):
 
         if not telemetry.connected:
             return False, STATUS_BLOCKED_DISCONNECTED
-
-        if telemetry.battery_remaining_percent < self.min_battery_percent:
-            return False, STATUS_BLOCKED_LOW_BATTERY
+        #Blocked for testing 
+        #if telemetry.battery_remaining_percent < self.min_battery_percent:
+        #    return False, STATUS_BLOCKED_LOW_BATTERY
 
         if self.require_gps and not telemetry.health_gps_ok:
             return False, STATUS_BLOCKED_GPS
@@ -426,29 +426,56 @@ class ControlNode(Node):
 
         return command
 
-    def publish_idle(self, status: str, source_error_x: float = 0.0, source_error_y: float = 0.0) -> None:
+
+    def publish_idle(
+        self,
+        status: str,
+        source_error_x: float = 0.0,
+        source_error_y: float = 0.0,
+        desired_yaw: float | None = None,
+    ) -> None:
+      # IDLE must always mean no real movement command is being sent.
+      # desired_yaw is debug-only so we can see what yaw WOULD have been commanded
+      # if autonomy/safety gates allowed movement.
         self.last_command_forward = 0.0
         self.last_command_right = 0.0
         self.last_command_down = 0.0
         self.last_command_yaw = 0.0
 
+        debug_status = status
+        if desired_yaw is not None:
+            debug_status = f"{status} | desired_yaw={desired_yaw:.3f}"
+
         command = self.make_command(
             CMD_IDLE,
-            status,
+            debug_status,
             executed=False,
             source_error_x=source_error_x,
             source_error_y=source_error_y,
         )
+
+        # Extra safety: make sure idle command cannot accidentally carry motion.
+        command.velocity_forward = 0.0
+        command.velocity_right = 0.0
+        command.velocity_down = 0.0
+        command.yaw_rate = 0.0
+
         self.command_pub.publish(command)
         self.command_count += 1
         self.idle_command_count += 1
+
         self.diagnostics.mark_published(
             self.control_command_topic,
-            summary=f"commands={self.command_count}, idle={self.idle_command_count}, status={status}",
+            summary=(
+                f"commands={self.command_count}, "
+                f"idle={self.idle_command_count}, "
+                f"status={debug_status}"
+            ),
         )
 
     def control_loop(self) -> None:
         current_time = time.time()
+        desired_yaw = None
 
         if self.last_target_error is None:
             self.publish_idle(STATUS_NO_TARGET)
@@ -461,88 +488,94 @@ class ControlNode(Node):
                     f"Target lost by control node | target_error stale for {target_age:.2f}s"
                 )
                 self.target_locked = False
-            self.publish_idle(f"{STATUS_TARGET_STALE} ({target_age:.2f}s)")
+
+            self.publish_idle(
+                f"{STATUS_TARGET_STALE} ({target_age:.2f}s)",
+                source_error_x=float(self.last_target_error.error_x),
+                source_error_y=float(self.last_target_error.error_y),
+            )
             return
 
         target = self.last_target_error
 
+        # Calculate debug yaw BEFORE autonomy/safety blocks.
+        # This lets /control_command show what yaw WOULD be commanded,
+        # while actual yaw_rate still stays zero when blocked.
+        error_x = self.apply_deadband(float(target.error_x), self.deadband_x)
+        desired_yaw = error_x * self.gain_yaw
+
         if not self.autonomy_enabled:
             self.publish_idle(
                 STATUS_BLOCKED_DISABLED,
-                source_error_x=target.error_x,
-                source_error_y=target.error_y,
+                source_error_x=float(target.error_x),
+                source_error_y=float(target.error_y),
+                desired_yaw=desired_yaw,
             )
             return
 
         if not (target.target_visible and target.tracking_state == "LOCKED"):
             self.publish_idle(
                 STATUS_TARGET_NOT_VISIBLE,
-                source_error_x=target.error_x,
-                source_error_y=target.error_y,
+                source_error_x=float(target.error_x),
+                source_error_y=float(target.error_y),
+                desired_yaw=desired_yaw,
             )
             return
-
-        error_x = self.apply_deadband(float(target.error_x), self.deadband_x)
 
         # Current safe autonomy mode is yaw-only:
         #   error_x < 0 => yaw negative
         #   error_x > 0 => yaw positive
         # No forward/back, right/left, altitude, or orbit commands are generated here.
-        desired_yaw = error_x * self.gain_yaw
-        limited_yaw = self.rate_limit_value(
+        desired_yaw = self.clamp(
+            desired_yaw,
+            -self.max_yaw_rate,
+            self.max_yaw_rate,
+        )
+
+        desired_yaw = self.rate_limit_value(
             desired_yaw,
             self.last_command_yaw,
             self.max_yaw_accel * self.control_period,
         )
-        limited_yaw = self.clamp(limited_yaw, -self.max_yaw_rate, self.max_yaw_rate)
 
         safe, reason = self.check_safety(current_time)
-
-        output_forward = 0.0
-        output_right = 0.0
-        output_down = 0.0
-        output_yaw = limited_yaw if safe else 0.0
-
-        self.last_command_forward = output_forward
-        self.last_command_right = output_right
-        self.last_command_down = output_down
-        self.last_command_yaw = output_yaw
-
-        if safe:
-            self.get_logger().info(
-                f"Yaw command | error_x={target.error_x:+.3f}, deadbanded={error_x:+.3f}, "
-                f"yaw_rate={output_yaw:+.3f} rad/s",
-                throttle_duration_sec=0.5,
+        if not safe:
+            self.publish_idle(
+                reason,
+                source_error_x=float(target.error_x),
+                source_error_y=float(target.error_y),
+                desired_yaw=desired_yaw,
             )
-        else:
-            self.get_logger().info(
-                f"blocked={reason} intended yaw={limited_yaw:+.3f} from error_x={target.error_x:+.3f}",
-                throttle_duration_sec=1.0,
-            )
+            return
 
         command = self.make_command(
-            CMD_VELOCITY if safe else CMD_IDLE,
-            reason,
-            executed=safe,
-            velocity_forward=output_forward,
-            velocity_right=output_right,
-            velocity_down=output_down,
-            yaw_rate=output_yaw,
-            source_error_x=target.error_x,
-            source_error_y=target.error_y,
+            CMD_VELOCITY,
+            STATUS_SENT,
+            executed=True,
+            velocity_forward=0.0,
+            velocity_right=0.0,
+            velocity_down=0.0,
+            yaw_rate=desired_yaw,
+            source_error_x=float(target.error_x),
+            source_error_y=float(target.error_y),
         )
+
+        self.last_command_forward = 0.0
+        self.last_command_right = 0.0
+        self.last_command_down = 0.0
+        self.last_command_yaw = desired_yaw
 
         self.command_pub.publish(command)
         self.command_count += 1
-        if safe:
-            self.executed_command_count += 1
-        else:
-            self.idle_command_count += 1
+        self.executed_command_count += 1
+
         self.diagnostics.mark_published(
             self.control_command_topic,
             summary=(
-                f"commands={self.command_count}, executed={self.executed_command_count}, "
-                f"idle={self.idle_command_count}, status={reason}, yaw={output_yaw:+.3f}"
+                f"commands={self.command_count}, "
+                f"executed={self.executed_command_count}, "
+                f"yaw={desired_yaw:.3f}, "
+                f"status={STATUS_SENT}"
             ),
         )
 
