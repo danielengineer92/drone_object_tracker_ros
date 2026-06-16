@@ -31,6 +31,10 @@ from drone_diagnostics.node_diagnostics import NodeDiagnostics
 
 CMD_IDLE = "IDLE"
 CMD_VELOCITY = "VELOCITY"
+CMD_YAW_RATE_ONLY_TEST = "YAW_RATE_ONLY_TEST"
+
+CONTROL_MODE_VELOCITY = "VELOCITY"
+CONTROL_MODE_YAW_RATE_ONLY_TEST = "YAW_RATE_ONLY_TEST"
 
 STATUS_SENT = "SENT"
 STATUS_NO_TARGET = "NO_TARGET_DATA"
@@ -46,7 +50,7 @@ STATUS_BLOCKED_DISCONNECTED = "BLOCKED_NOT_CONNECTED"
 STATUS_ALTITUDE_CLAMPED = "ALTITUDE_FLOOR_CLAMPED"
 
 DYNAMIC_PARAMS = {
-    "autonomy_enabled", "autonomous_enabled",
+    "autonomy_enabled", "autonomous_enabled", "control_output_mode",
     "gain_forward", "gain_right", "gain_down", "gain_yaw",
     "deadband_x", "deadband_y",
     "max_velocity_forward", "max_velocity_right", "max_velocity_down", "max_yaw_rate",
@@ -64,6 +68,10 @@ class ControlNode(Node):
         # Keep autonomous_enabled as a backward-compatible alias for older launch/config files.
         self.declare_parameter("autonomy_enabled", False)
         self.declare_parameter("autonomous_enabled", False)
+        # VELOCITY keeps the old MAVSDK VelocityBodyYawspeed path.
+        # YAW_RATE_ONLY_TEST tells the bridge to use MAVSDK AttitudeRate instead,
+        # which avoids pulling PX4 into X/Y velocity control for bench testing.
+        self.declare_parameter("control_output_mode", CONTROL_MODE_YAW_RATE_ONLY_TEST)
 
         self.declare_parameter("gain_forward", 1.0)  # reserved for future distance/area control
         self.declare_parameter("gain_right", 1.0)    # reserved; strafe disabled for now
@@ -99,6 +107,7 @@ class ControlNode(Node):
         legacy_autonomous_param = bool(self.get_parameter("autonomous_enabled").value)
         self.autonomy_enabled = autonomy_param or legacy_autonomous_param
         self.autonomous_enabled = self.autonomy_enabled  # compatibility for existing status/log tooling
+        self.control_output_mode = str(self.get_parameter("control_output_mode").value).upper()
 
         self.gain_forward = float(self.get_parameter("gain_forward").value)
         self.gain_right = float(self.get_parameter("gain_right").value)
@@ -205,6 +214,7 @@ class ControlNode(Node):
             f"control_command_topic={self.control_command_topic}, "
             f"autonomy_enable_topic={self.autonomy_enable_topic}, "
             f"autonomy_enabled={self.autonomy_enabled}, "
+            f"control_output_mode={self.control_output_mode}, "
             "mode=YAW_ONLY, forward=0, right=0, down=0"
         )
 
@@ -224,6 +234,11 @@ class ControlNode(Node):
             raise ValueError(f"target_timeout must be > 0, got {self.target_timeout}")
         if self.telemetry_timeout <= 0.0:
             raise ValueError(f"telemetry_timeout must be > 0, got {self.telemetry_timeout}")
+        if self.control_output_mode not in (CONTROL_MODE_VELOCITY, CONTROL_MODE_YAW_RATE_ONLY_TEST):
+            raise ValueError(
+                "control_output_mode must be VELOCITY or YAW_RATE_ONLY_TEST, "
+                f"got {self.control_output_mode}"
+            )
 
         nonnegative = {
             "max_velocity_forward": self.max_velocity_forward,
@@ -270,9 +285,20 @@ class ControlNode(Node):
                         reason=f"{param.name} must be > 0",
                     )
 
+            if param.name == "control_output_mode":
+                mode = str(param.value).upper()
+                if mode not in (CONTROL_MODE_VELOCITY, CONTROL_MODE_YAW_RATE_ONLY_TEST):
+                    return SetParametersResult(
+                        successful=False,
+                        reason="control_output_mode must be VELOCITY or YAW_RATE_ONLY_TEST",
+                    )
+
         for param in params:
             old_value = getattr(self, param.name, None)
-            setattr(self, param.name, param.value)
+            value = param.value
+            if param.name == "control_output_mode":
+                value = str(value).upper()
+            setattr(self, param.name, value)
 
             if param.name in ("autonomy_enabled", "autonomous_enabled"):
                 self.set_autonomy_enabled(bool(param.value), source=f"parameter:{param.name}")
@@ -548,8 +574,17 @@ class ControlNode(Node):
             )
             return
 
+        # Tell the bridge which MAVSDK setpoint family to use.
+        # YAW_RATE_ONLY_TEST is the indoor/bench path: yaw-rate only, no X/Y velocity setpoint.
+        # VELOCITY keeps the older VelocityBodyYawspeed path for later outdoor/GPS testing.
+        command_type = (
+            CMD_YAW_RATE_ONLY_TEST
+            if self.control_output_mode == CONTROL_MODE_YAW_RATE_ONLY_TEST
+            else CMD_VELOCITY
+        )
+
         command = self.make_command(
-            CMD_VELOCITY,
+            command_type,
             STATUS_SENT,
             executed=True,
             velocity_forward=0.0,
@@ -574,6 +609,7 @@ class ControlNode(Node):
             summary=(
                 f"commands={self.command_count}, "
                 f"executed={self.executed_command_count}, "
+                f"type={command_type}, "
                 f"yaw={desired_yaw:.3f}, "
                 f"status={STATUS_SENT}"
             ),
@@ -585,6 +621,7 @@ class ControlNode(Node):
             f"commands={self.command_count}, executed={self.executed_command_count}, idle={self.idle_command_count}, "
             f"target_msgs={self.target_error_count}, telemetry_msgs={self.telemetry_count}, "
             f"autonomy_msgs={self.autonomy_enable_count}, "
+            f"output_mode={self.control_output_mode}, "
             f"target_age={self.diagnostics.format_age(self.target_error_topic)}, "
             f"telemetry_age={self.diagnostics.format_age(self.telemetry_topic)}, "
             f"forward={self.last_command_forward:.3f}, "
