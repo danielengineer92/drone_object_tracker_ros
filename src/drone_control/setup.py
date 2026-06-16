@@ -20,6 +20,7 @@ setup(
     entry_points={
         'console_scripts': [
             'control_node = drone_control.control_node:main',
+            'autonomy_manager_node = drone_control.autonomy_manager_node:main',
         ],
     },
 )

@@ -95,6 +95,16 @@ def generate_launch_description() -> LaunchDescription:
         output='screen',
     )
 
+
+    autonomy_manager = Node(
+        package='drone_control',
+        executable='autonomy_manager_node',
+        name='autonomy_manager_node',
+        parameters=[config_file],
+        output='screen',
+        emulate_tty=True,
+    )
+
     control = Node(
         package='drone_control',
         executable='control_node',
@@ -128,14 +138,15 @@ def generate_launch_description() -> LaunchDescription:
         connection_url_arg,
         LogInfo(msg='=== DRONE VISION SYSTEM - FULL SYSTEM MODE ==='),
         LogInfo(msg='Real camera + YOLO + PX4 MAVSDK bridge active.'),
-        LogInfo(msg='*** autonomy_enabled is FALSE - /control_command stays IDLE until /autonomy_enable true ***'),
-        LogInfo(msg='*** mavsdk_offboard_enabled is FALSE - no movement setpoints sent to PX4 until /mavsdk_offboard_enable true ***'),
-        LogInfo(msg="Enable control node yaw autonomy: ros2 topic pub --once /autonomy_enable std_msgs/msg/Bool '{data: true}'"),
-        LogInfo(msg="Enable MAVSDK executor: ros2 topic pub --once /mavsdk_offboard_enable std_msgs/msg/Bool '{data: true}'"),
+        LogInfo(msg='*** autonomy_manager_node owns /autonomy_enable and /mavsdk_offboard_enable ***'),
+        LogInfo(msg='*** request autonomy with /autonomy_request; code still stays idle until target + safety gates pass ***'),
+        LogInfo(msg="Request autonomy: ros2 topic pub --once /autonomy_request std_msgs/msg/Bool '{data: true}'"),
+        LogInfo(msg="Disable autonomy: ros2 topic pub --once /autonomy_request std_msgs/msg/Bool '{data: false}'"),
         camera,
         yolo,
         tracker,
         telemetry,
+        autonomy_manager,
         control,
         visualizer,
         health_monitor,

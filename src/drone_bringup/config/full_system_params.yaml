@@ -67,6 +67,37 @@ telemetry_node:
     allow_translation_commands: false  # yaw-only; forward/right/down forced to zero
     stop_offboard_on_disable: true
 
+autonomy_manager_node:
+  ros__parameters:
+    autonomy_request_topic: "/autonomy_request"
+    target_error_topic: "/target_error"
+    telemetry_topic: "/drone/telemetry"
+    autonomy_enable_topic: "/autonomy_enable"
+    offboard_enable_topic: "/mavsdk_offboard_enable"
+    autonomy_state_topic: "/autonomy_state"
+
+    # One central state machine owns the gates. Keep request false by default.
+    manager_enabled: true
+    initial_autonomy_request: false
+    publish_rate: 10.0
+
+    # Timing
+    target_timeout: 1.0
+    telemetry_timeout: 2.0
+    request_timeout: 0.0  # 0 = latch request until an explicit false message arrives
+
+    # Offboard executor can be enabled while READY/TARGET_LOST, but real movement
+    # stays blocked until state == TRACKING and /autonomy_enable is true.
+    enable_offboard_when_ready: true
+
+    # Safety requirements
+    require_connected: true
+    require_armed: true
+    require_health_all_ok: false
+    require_gps: false
+    required_flight_mode: ""  # leave blank to avoid Offboard chicken/egg during early testing
+    min_battery_percent: 20.0
+
 control_node:
   ros__parameters:
     target_error_topic: "/target_error"
