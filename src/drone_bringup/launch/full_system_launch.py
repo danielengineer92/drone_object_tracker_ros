@@ -5,8 +5,8 @@ Launches real camera, YOLO detection, tracker, control, PX4 MAVSDK bridge,
 and visualizer. Requires camera and PX4 drone connection.
 
 WARNING: autonomy_enabled defaults to False and mavsdk_offboard_enabled defaults to False.
-Commands stay IDLE until /autonomy_enable is true, and nothing is sent to PX4
-until /mavsdk_offboard_enable is also true.
+Commands stay IDLE until /drone/autonomy/enabled is true, and nothing is sent to PX4
+until /drone/mavsdk/offboard_enable is also true.
 """
 
 import os
@@ -14,8 +14,10 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, LogInfo
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -54,6 +56,19 @@ def generate_launch_description() -> LaunchDescription:
         'connection_url',
         default_value='serial:///dev/ttyACM0:57600',
         description='MAVSDK connection URL to PX4'
+    )
+
+
+    dashboard_arg = DeclareLaunchArgument(
+        'dashboard',
+        default_value='true',
+        description='Launch the lightweight web dashboard node.'
+    )
+
+    dashboard_port_arg = DeclareLaunchArgument(
+        'dashboard_port',
+        default_value='8080',
+        description='HTTP port for the dashboard.'
     )
 
     # Nodes
@@ -130,18 +145,32 @@ def generate_launch_description() -> LaunchDescription:
         output='screen',
     )
 
+
+    dashboard = Node(
+        package='drone_dashboard',
+        executable='dashboard_node',
+        name='dashboard_node',
+        parameters=[config_file, {'port': ParameterValue(LaunchConfiguration('dashboard_port'), value_type=int)}],
+        output='screen',
+        emulate_tty=True,
+        condition=IfCondition(LaunchConfiguration('dashboard')),
+    )
+
     return LaunchDescription([
         headless_arg,
+        dashboard_arg,
+        dashboard_port_arg,
         camera_index_arg,
         model_path_arg,
         target_class_arg,
         connection_url_arg,
         LogInfo(msg='=== DRONE VISION SYSTEM - FULL SYSTEM MODE ==='),
         LogInfo(msg='Real camera + YOLO + PX4 MAVSDK bridge active.'),
-        LogInfo(msg='*** autonomy_manager_node owns /autonomy_enable and /mavsdk_offboard_enable ***'),
-        LogInfo(msg='*** request autonomy with /autonomy_request; code still stays idle until target + safety gates pass ***'),
-        LogInfo(msg="Request autonomy: ros2 topic pub --once /autonomy_request std_msgs/msg/Bool '{data: true}'"),
-        LogInfo(msg="Disable autonomy: ros2 topic pub --once /autonomy_request std_msgs/msg/Bool '{data: false}'"),
+        LogInfo(msg=['Dashboard: http://<pi-ip>:', LaunchConfiguration('dashboard_port'), '/']),
+        LogInfo(msg='*** autonomy_manager_node owns /drone/autonomy/enabled and /drone/mavsdk/offboard_enable ***'),
+        LogInfo(msg='*** request autonomy with /drone/autonomy/request; code still stays idle until target + safety gates pass ***'),
+        LogInfo(msg="Request autonomy: ros2 topic pub --once /drone/autonomy/request std_msgs/msg/Bool '{data: true}'"),
+        LogInfo(msg="Disable autonomy: ros2 topic pub --once /drone/autonomy/request std_msgs/msg/Bool '{data: false}'"),
         camera,
         yolo,
         tracker,
@@ -150,4 +179,5 @@ def generate_launch_description() -> LaunchDescription:
         control,
         visualizer,
         health_monitor,
+        dashboard,
     ])

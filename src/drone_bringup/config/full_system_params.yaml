@@ -2,7 +2,7 @@
 
 camera_node:
   ros__parameters:
-    image_topic: "/camera/image_raw"
+    image_topic: "/drone/camera/image_raw"
     frame_id: "camera_optical_frame"
     buffer_size: 1
     camera_index: 0
@@ -15,14 +15,14 @@ camera_node:
 
 yolo_node:
   ros__parameters:
-    detections_topic: "/detections"
-    image_topic: "/camera/image_raw"
+    detections_topic: "/drone/vision/detections"
+    image_topic: "/drone/camera/image_raw"
     process_every_n_frames: 1
-    model_path: "yolov8n.pt"
-    confidence_threshold: 0.5
+    model_path: "/home/robotpi/drone_ws/src/drone_object_tracker_ros/models/red_ball_ncnn_model"
+    confidence_threshold: 0.25
     iou_threshold: 0.45
     device: "cpu"
-    input_size: 640
+    input_size: 320
     max_detections: 20
     half_precision: false
     verbose: false
@@ -30,10 +30,10 @@ yolo_node:
 
 tracker_node:
   ros__parameters:
-    detections_topic: "/detections"
-    target_error_topic: "/target_error"
-    target_class: "person"
-    min_confidence: 0.5
+    detections_topic: "/drone/vision/detections"
+    target_error_topic: "/drone/tracking/target_error"
+    target_class: "red_ball"
+    min_confidence: 0.25
     detection_timeout: 1.5
     reacquisition_timeout: 4.0
     smoothing_alpha: 0.35
@@ -55,10 +55,10 @@ telemetry_node:
     # This same node owns the single MAVSDK/Pixhawk connection, so
     # telemetry and commands do not fight over /dev/ttyACM0.
     # ============================================================
-    control_command_topic: "/control_command"
-    offboard_enable_topic: "/mavsdk_offboard_enable"
-    command_status_topic: "/mavsdk_command_status"
-    mavsdk_offboard_enabled: false  # second hard gate; enable with /mavsdk_offboard_enable
+    control_command_topic: "/drone/control/command"
+    offboard_enable_topic: "/drone/mavsdk/offboard_enable"
+    command_status_topic: "/drone/mavsdk/command_status"
+    mavsdk_offboard_enabled: false  # second hard gate; enable with /drone/mavsdk/offboard_enable
     command_rate: 20.0
     command_timeout: 0.5
     require_armed_for_offboard: true
@@ -69,12 +69,13 @@ telemetry_node:
 
 autonomy_manager_node:
   ros__parameters:
-    autonomy_request_topic: "/autonomy_request"
-    target_error_topic: "/target_error"
+    autonomy_request_topic: "/drone/autonomy/request"
+    target_error_topic: "/drone/tracking/target_error"
     telemetry_topic: "/drone/telemetry"
-    autonomy_enable_topic: "/autonomy_enable"
-    offboard_enable_topic: "/mavsdk_offboard_enable"
-    autonomy_state_topic: "/autonomy_state"
+    autonomy_enable_topic: "/drone/autonomy/enabled"
+    offboard_enable_topic: "/drone/mavsdk/offboard_enable"
+    autonomy_state_topic: "/drone/autonomy/state"
+    mission_state_topic: "/drone/mission/state"
 
     # One central state machine owns the gates. Keep request false by default.
     manager_enabled: true
@@ -87,7 +88,7 @@ autonomy_manager_node:
     request_timeout: 0.0  # 0 = latch request until an explicit false message arrives
 
     # Offboard executor can be enabled while READY/TARGET_LOST, but real movement
-    # stays blocked until state == TRACKING and /autonomy_enable is true.
+    # stays blocked until state == TRACKING and /drone/autonomy/enabled is true.
     enable_offboard_when_ready: true
 
     # Safety requirements
@@ -100,9 +101,9 @@ autonomy_manager_node:
 
 control_node:
   ros__parameters:
-    target_error_topic: "/target_error"
+    target_error_topic: "/drone/tracking/target_error"
     telemetry_topic: "/drone/telemetry"
-    control_command_topic: "/control_command"
+    control_command_topic: "/drone/control/command"
     # ============================================================
     # SAFETY — leave autonomy_enabled FALSE until bench-tested
     # ============================================================
@@ -159,11 +160,11 @@ control_node:
 
 visualizer_node:
   ros__parameters:
-    image_topic: "/camera/image_raw"
-    detections_topic: "/detections"
-    target_error_topic: "/target_error"
+    image_topic: "/drone/camera/image_raw"
+    detections_topic: "/drone/vision/detections"
+    target_error_topic: "/drone/tracking/target_error"
     telemetry_topic: "/drone/telemetry"
-    control_command_topic: "/control_command"
+    control_command_topic: "/drone/control/command"
     window_name: "Drone Vision System (FULL SYSTEM)"
     display_width: 960
     display_height: 720
@@ -176,12 +177,28 @@ visualizer_node:
 
 health_monitor_node:
   ros__parameters:
-    image_topic: "/camera/image_raw"
-    detections_topic: "/detections"
-    target_error_topic: "/target_error"
+    image_topic: "/drone/camera/image_raw"
+    detections_topic: "/drone/vision/detections"
+    target_error_topic: "/drone/tracking/target_error"
     telemetry_topic: "/drone/telemetry"
-    control_command_topic: "/control_command"
-    mavsdk_command_status_topic: "/mavsdk_command_status"
+    control_command_topic: "/drone/control/command"
+    mavsdk_command_status_topic: "/drone/mavsdk/command_status"
     monitor_mavsdk_command_status: true
     heartbeat_period: 2.0
     stale_seconds: 2.0
+
+dashboard_node:
+  ros__parameters:
+    host: "0.0.0.0"
+    port: 8080
+    image_topic: "/drone/camera/image_raw"
+    detections_topic: "/drone/vision/detections"
+    target_error_topic: "/drone/tracking/target_error"
+    telemetry_topic: "/drone/telemetry"
+    control_command_topic: "/drone/control/command"
+    autonomy_request_topic: "/drone/autonomy/request"
+    autonomy_enable_topic: "/drone/autonomy/enabled"
+    offboard_enable_topic: "/drone/mavsdk/offboard_enable"
+    autonomy_state_topic: "/drone/autonomy/state"
+    mission_state_topic: "/drone/mission/state"
+    mavsdk_command_status_topic: "/drone/mavsdk/command_status"

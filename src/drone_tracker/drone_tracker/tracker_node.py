@@ -2,13 +2,13 @@
 Target tracking node.
 
 Subscribes:
-    /detections
+    /drone/vision/detections
 
 Publishes:
-    /target_error
+    /drone/tracking/target_error
 
 Safety-critical behavior:
-    - detection_visible_now is the truth from the latest /detections message.
+    - detection_visible_now is the truth from the latest /drone/vision/detections message.
     - target_visible is what downstream control should treat as a fresh usable target.
     - A short bounded grace period prevents LOCKED/LOST flicker on 1-frame YOLO drops.
     - Tracker memory may help choose between detections, but memory can only keep
@@ -64,7 +64,7 @@ class TrackerNode(Node):
         self.declare_parameter("publish_rate", 30.0)
         self.declare_parameter("proximity_threshold", 0.15)
 
-        # Stale stream timeout means /detections stopped arriving at all.
+        # Stale stream timeout means /drone/vision/detections stopped arriving at all.
         self.declare_parameter("stale_detection_timeout", 2.5)
 
         # Grace/debounce settings. These prevent LOCKED/LOST flicker when YOLO
@@ -74,8 +74,8 @@ class TrackerNode(Node):
         self.declare_parameter("lock_confirm_frames", 1)
 
         # Topics
-        self.declare_parameter("detections_topic", "/detections")
-        self.declare_parameter("target_error_topic", "/target_error")
+        self.declare_parameter("detections_topic", "/drone/vision/detections")
+        self.declare_parameter("target_error_topic", "/drone/tracking/target_error")
 
         self.target_class = str(self.get_parameter("target_class").value).strip().lower()
         self.min_confidence = float(self.get_parameter("min_confidence").value)
@@ -102,7 +102,7 @@ class TrackerNode(Node):
 
         self.state = TrackingState.SEARCHING
 
-        # Latest /detections message truth.
+        # Latest /drone/vision/detections message truth.
         self.last_detection_message_time = 0.0
         self.latest_detection_count = 0
         self.latest_usable_target_count = 0
@@ -413,7 +413,7 @@ class TrackerNode(Node):
             self.mark_target_lost(
                 current_time,
                 reason=(
-                    f"Target lost: /detections stream stale | "
+                    f"Target lost: /drone/vision/detections stream stale | "
                     f"stream_age={current_time - self.last_detection_message_time:.2f}s"
                 ),
             )

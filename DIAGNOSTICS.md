@@ -23,13 +23,13 @@ ros2 run drone_diagnostics health_monitor_node
 
 It subscribes to the major pipeline topics:
 
-- `/camera/image_raw`
-- `/detections`
-- `/target_error`
+- `/drone/camera/image_raw`
+- `/drone/vision/detections`
+- `/drone/tracking/target_error`
 - `/drone/telemetry`
-- `/control_command`
-- `/autonomy_enable` (operator command topic; use `ros2 topic echo /autonomy_enable` when testing the control gate)
-- `/mavsdk_command_status` in full-system mode (MAVSDK/PX4 command bridge status)
+- `/drone/control/command`
+- `/drone/autonomy/enabled` (operator command topic; use `ros2 topic echo /drone/autonomy/enabled` when testing the control gate)
+- `/drone/mavsdk/command_status` in full-system mode (MAVSDK/PX4 command bridge status)
 
 It is included automatically in:
 
@@ -48,11 +48,11 @@ source ~/drone_ws/install/setup.bash
 ros2 launch drone_bringup vision_launch.py
 ros2 topic list
 ros2 node list
-ros2 topic hz /camera/image_raw
-ros2 topic hz /detections
-ros2 topic hz /target_error
-ros2 topic hz /control_command
-ros2 topic echo /control_command
+ros2 topic hz /drone/camera/image_raw
+ros2 topic hz /drone/vision/detections
+ros2 topic hz /drone/tracking/target_error
+ros2 topic hz /drone/control/command
+ros2 topic echo /drone/control/command
 ```
 
 ## How to read the logs
@@ -69,23 +69,23 @@ ros2 topic echo /control_command
 For the real-camera vision pipeline, the healthy flow should look like:
 
 ```text
-camera_node OUT /camera/image_raw rate ~= camera FPS
-health_monitor IN /camera/image_raw fresh
+camera_node OUT /drone/camera/image_raw rate ~= camera FPS
+health_monitor IN /drone/camera/image_raw fresh
 
-yolo_node IN /camera/image_raw fresh
-yolo_node OUT /detections fresh
+yolo_node IN /drone/camera/image_raw fresh
+yolo_node OUT /drone/vision/detections fresh
 
-tracker_node IN /detections fresh
-tracker_node OUT /target_error fresh
+tracker_node IN /drone/vision/detections fresh
+tracker_node OUT /drone/tracking/target_error fresh
 
-control_node IN /target_error fresh
+control_node IN /drone/tracking/target_error fresh
 control_node IN /drone/telemetry fresh
-control_node IN /autonomy_enable when operator toggles autonomy
-control_node OUT /control_command fresh
+control_node IN /drone/autonomy/enabled when operator toggles autonomy
+control_node OUT /drone/control/command fresh
 
-telemetry_node IN /control_command fresh
-telemetry_node IN /mavsdk_offboard_enable when operator enables actual PX4 command sending
-telemetry_node OUT /mavsdk_command_status fresh
+telemetry_node IN /drone/control/command fresh
+telemetry_node IN /drone/mavsdk/offboard_enable when operator enables actual PX4 command sending
+telemetry_node OUT /drone/mavsdk/command_status fresh
 ```
 
 If one stage is stale, fix the first broken upstream topic before chasing downstream symptoms.

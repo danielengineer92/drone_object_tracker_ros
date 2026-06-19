@@ -10,8 +10,10 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, LogInfo
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -45,6 +47,19 @@ def generate_launch_description() -> LaunchDescription:
         description='Target class to track'
     )
 
+
+    dashboard_arg = DeclareLaunchArgument(
+        'dashboard',
+        default_value='true',
+        description='Launch the lightweight web dashboard node.'
+    )
+
+    dashboard_port_arg = DeclareLaunchArgument(
+        'dashboard_port',
+        default_value='8080',
+        description='HTTP port for the dashboard.'
+    )
+
     # Nodes
     camera = Node(
         package='drone_camera',
@@ -76,6 +91,15 @@ def generate_launch_description() -> LaunchDescription:
         output='screen',
     )
 
+    autonomy_manager = Node(
+        package='drone_control',
+        executable='autonomy_manager_node',
+        name='autonomy_manager_node',
+        parameters=[config_file],
+        output='screen',
+        emulate_tty=True,
+    )
+
     control = Node(
         package='drone_control',
         executable='control_node',
@@ -83,14 +107,6 @@ def generate_launch_description() -> LaunchDescription:
         parameters=[config_file],
         output='screen',
         emulate_tty=True,
-    )
-
-    telemetry = Node(
-        package='drone_fake',
-        executable='fake_telemetry_node',
-        name='fake_telemetry_node',
-        parameters=[config_file],
-        output='screen',
     )
 
     visualizer = Node(
@@ -109,19 +125,34 @@ def generate_launch_description() -> LaunchDescription:
         output='screen',
     )
 
+
+    dashboard = Node(
+        package='drone_dashboard',
+        executable='dashboard_node',
+        name='dashboard_node',
+        parameters=[config_file, {'port': ParameterValue(LaunchConfiguration('dashboard_port'), value_type=int)}],
+        output='screen',
+        emulate_tty=True,
+        condition=IfCondition(LaunchConfiguration('dashboard')),
+    )
+
     return LaunchDescription([
         headless_arg,
+        dashboard_arg,
+        dashboard_port_arg,
         camera_index_arg,
         model_path_arg,
         target_class_arg,
         LogInfo(msg='=== DRONE VISION SYSTEM - VISION MODE ==='),
-        LogInfo(msg='Real camera + YOLO detection active. Fake telemetry only; no Pixhawk connection.'),
-        LogInfo(msg='autonomy_enabled is FALSE - /control_command stays IDLE until /autonomy_enable true.'),
+        LogInfo(msg='Real camera + YOLO detection active.'),
+        LogInfo(msg=['Dashboard: http://<pi-ip>:', LaunchConfiguration('dashboard_port'), '/']),
+        LogInfo(msg='autonomy request is FALSE - /drone/control/command stays IDLE until the manager publishes /drone/autonomy/enabled true.'),
         camera,
         yolo,
         tracker,
+        autonomy_manager,
         control,
-        telemetry,
         visualizer,
         health_monitor,
+        dashboard,
     ])

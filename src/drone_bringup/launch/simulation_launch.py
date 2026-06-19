@@ -10,8 +10,10 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, LogInfo
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -32,6 +34,19 @@ def generate_launch_description() -> LaunchDescription:
         'target_class',
         default_value='person',
         description='Target class to track'
+    )
+
+
+    dashboard_arg = DeclareLaunchArgument(
+        'dashboard',
+        default_value='true',
+        description='Launch the lightweight web dashboard node.'
+    )
+
+    dashboard_port_arg = DeclareLaunchArgument(
+        'dashboard_port',
+        default_value='8080',
+        description='HTTP port for the dashboard.'
     )
 
     # Nodes
@@ -67,6 +82,15 @@ def generate_launch_description() -> LaunchDescription:
         output='screen',
     )
 
+    autonomy_manager = Node(
+        package='drone_control',
+        executable='autonomy_manager_node',
+        name='autonomy_manager_node',
+        parameters=[config_file],
+        output='screen',
+        emulate_tty=True,
+    )
+
     control = Node(
         package='drone_control',
         executable='control_node',
@@ -92,17 +116,33 @@ def generate_launch_description() -> LaunchDescription:
         output='screen',
     )
 
+
+    dashboard = Node(
+        package='drone_dashboard',
+        executable='dashboard_node',
+        name='dashboard_node',
+        parameters=[config_file, {'port': ParameterValue(LaunchConfiguration('dashboard_port'), value_type=int)}],
+        output='screen',
+        emulate_tty=True,
+        condition=IfCondition(LaunchConfiguration('dashboard')),
+    )
+
     return LaunchDescription([
         headless_arg,
+        dashboard_arg,
+        dashboard_port_arg,
         target_class_arg,
         LogInfo(msg='=== DRONE VISION SYSTEM - SIMULATION MODE ==='),
         LogInfo(msg='No hardware required. All data is simulated.'),
-        LogInfo(msg='autonomy_enabled is FALSE by default. Enable yaw-only sim commands with /autonomy_enable.'),
+        LogInfo(msg=['Dashboard: http://<pi-ip>:', LaunchConfiguration('dashboard_port'), '/']),
+        LogInfo(msg='autonomy request is FALSE by default. Request autonomy with /drone/autonomy/request or the dashboard button.'),
         fake_camera,
         fake_detection,
         fake_telemetry,
         tracker,
+        autonomy_manager,
         control,
         visualizer,
         health_monitor,
+        dashboard,
     ])

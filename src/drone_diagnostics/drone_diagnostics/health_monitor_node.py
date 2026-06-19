@@ -58,12 +58,12 @@ class HealthMonitorNode(Node):
     def __init__(self) -> None:
         super().__init__('health_monitor_node')
 
-        self.declare_parameter('image_topic', '/camera/image_raw')
-        self.declare_parameter('detections_topic', '/detections')
-        self.declare_parameter('target_error_topic', '/target_error')
+        self.declare_parameter('image_topic', '/drone/camera/image_raw')
+        self.declare_parameter('detections_topic', '/drone/vision/detections')
+        self.declare_parameter('target_error_topic', '/drone/tracking/target_error')
         self.declare_parameter('telemetry_topic', '/drone/telemetry')
-        self.declare_parameter('control_command_topic', '/control_command')
-        self.declare_parameter('mavsdk_command_status_topic', '/mavsdk_command_status')
+        self.declare_parameter('control_command_topic', '/drone/control/command')
+        self.declare_parameter('mavsdk_command_status_topic', '/drone/mavsdk/command_status')
         self.declare_parameter('monitor_mavsdk_command_status', False)
         self.declare_parameter('heartbeat_period', 2.0)
         self.declare_parameter('stale_seconds', 2.0)

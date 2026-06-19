@@ -12,42 +12,46 @@ This system provides:
 - PX4 yaw-only Offboard command bridge via MAVSDK
 - Control command generation with safety gating
 - Real-time visualization with diagnostics
+- Lightweight web dashboard/control-station page
 
 ## Safety
 
-**CRITICAL**: `autonomy_enabled` defaults to `false`. The control node also subscribes to `/autonomy_enable` (`std_msgs/Bool`) for explicit operator enable/disable.
+**CRITICAL**: autonomy is request-based now. Operators publish a request to
+`/drone/autonomy/request`, and `autonomy_manager_node` decides whether it is
+safe to publish `/drone/autonomy/enabled` and `/drone/mavsdk/offboard_enable`.
 
-When disabled:
-- `/target_error` is still received and processed
-- `/control_command` is always published as `IDLE`
+When autonomy is not enabled by the manager:
+- `/drone/tracking/target_error` is still received and processed
+- `/drone/control/command` is always published as `IDLE`
 - all velocity fields, including `yaw_rate`, are `0.0`
 - no movement command is generated
 
-Enable yaw-only autonomy after bench testing:
+Request autonomy after bench testing:
 
 ```bash
-ros2 topic pub --once /autonomy_enable std_msgs/msg/Bool "{data: true}"
+ros2 topic pub --once /drone/autonomy/request std_msgs/msg/Bool "{data: true}"
 ```
 
 Disable autonomy:
 
 ```bash
-ros2 topic pub --once /autonomy_enable std_msgs/msg/Bool "{data: false}"
+ros2 topic pub --once /drone/autonomy/request std_msgs/msg/Bool "{data: false}"
 ```
 
-Actual PX4 command sending has a **second hard gate**. The MAVSDK bridge will not send Offboard setpoints until this is enabled:
+Watch state:
 
 ```bash
-ros2 topic pub --once /mavsdk_offboard_enable std_msgs/msg/Bool "{data: true}"
+ros2 topic echo /drone/mission/state
+ros2 topic echo /drone/autonomy/state
 ```
 
-Disable MAVSDK/PX4 command sending:
+Dashboard:
 
-```bash
-ros2 topic pub --once /mavsdk_offboard_enable std_msgs/msg/Bool "{data: false}"
+```text
+http://<raspberry-pi-ip>:8080/
 ```
 
-See `AUTONOMY_GATING.md` and `MAVSDK_COMMAND_BRIDGE.md` for the full test procedure.
+See `AUTONOMY_GATING.md`, `MAVSDK_COMMAND_BRIDGE.md`, and `DASHBOARD.md` for the full test procedure.
 
 Hardware Requirements
 Raspberry Pi 4 (4GB+ recommended)
@@ -99,17 +103,17 @@ ros2 launch drone_bringup full_system_launch.py connection_url:="serial:///dev/t
 ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
 │  camera_node │────▶│  yolo_node   │────▶│ tracker_node │
 │              │     │              │     │              │
-│ /camera/     │     │ /detections  │     │ /target_     │
-│  image_raw   │     │              │     │  error       │
+│ /drone/camera│     │ /drone/vision│     │ /drone/     │
+│ /image_raw   │     │              │     │  error       │
 └──────────────┘     └──────────────┘     └──────┬───────┘
                                                   │
 ┌──────────────┐                           ┌──────▼───────┐
 │telemetry_node│──────────────────────────▶│ control_node │
 │ MAVSDK bridge│                           │              │
-│ /drone/      │                           │ /control_    │
-│  telemetry   │◀──────────────────────────│  command     │
-│ /mavsdk_     │                           └──────────────┘
-│  command_    │        /mavsdk_offboard_enable gates actual PX4 sending
+│ /drone/      │                           │ /drone/     │
+│  telemetry   │◀──────────────────────────│ control/cmd │
+│ /drone/mavsdk│                           └──────────────┘
+│  command_    │        /drone/mavsdk/offboard_enable gates actual PX4 sending
 │  status      │
 └──────────────┘
 
@@ -122,16 +126,16 @@ ros2 launch drone_bringup full_system_launch.py connection_url:="serial:///dev/t
 Monitoring
 View topics
 ros2 topic list
-ros2 topic echo /target_error
-ros2 topic echo /control_command
+ros2 topic echo /drone/tracking/target_error
+ros2 topic echo /drone/control/command
 ros2 topic echo /drone/telemetry
-ros2 topic echo /mavsdk_command_status
+ros2 topic echo /drone/mavsdk/command_status
 
 Check parameters
 ros2 param list /control_node
 ros2 param get /control_node autonomy_enabled
-ros2 topic echo /autonomy_enable
-ros2 topic echo /mavsdk_offboard_enable
+ros2 topic echo /drone/autonomy/enabled
+ros2 topic echo /drone/mavsdk/offboard_enable
 
 Node status
 ros2 node list

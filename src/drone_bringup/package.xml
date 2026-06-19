@@ -22,6 +22,7 @@
   <exec_depend>drone_visualizer</exec_depend>
   <exec_depend>drone_fake</exec_depend>
   <exec_depend>drone_diagnostics</exec_depend>
+  <exec_depend>drone_dashboard</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

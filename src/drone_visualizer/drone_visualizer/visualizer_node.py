@@ -38,11 +38,11 @@ class VisualizerNode(Node):
         self.declare_parameter('show_control', True)
         self.declare_parameter('display_fps', 30.0)
         self.declare_parameter('headless', False)
-        self.declare_parameter('image_topic', '/camera/image_raw')
-        self.declare_parameter('detections_topic', '/detections')
-        self.declare_parameter('target_error_topic', '/target_error')
+        self.declare_parameter('image_topic', '/drone/camera/image_raw')
+        self.declare_parameter('detections_topic', '/drone/vision/detections')
+        self.declare_parameter('target_error_topic', '/drone/tracking/target_error')
         self.declare_parameter('telemetry_topic', '/drone/telemetry')
-        self.declare_parameter('control_command_topic', '/control_command')
+        self.declare_parameter('control_command_topic', '/drone/control/command')
 
         # Read parameters
         self._window_name: str = self.get_parameter('window_name').value

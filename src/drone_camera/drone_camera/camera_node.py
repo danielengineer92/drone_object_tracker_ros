@@ -1,4 +1,4 @@
-"""ROS 2 camera node. Publishes sensor_msgs/Image on /camera/image_raw by default."""
+"""ROS 2 camera node. Publishes sensor_msgs/Image on /drone/camera/image_raw by default."""
 
 import cv2
 import rclpy
@@ -25,7 +25,7 @@ class CameraNode(Node):
         self.frame_height = self._get_int_param("frame_height", 480, aliases=("height",))
         self.fps = self._get_int_param("fps", 30, aliases=("frame_rate",))
         self.frame_id = self._get_str_param("frame_id", "camera_optical_frame")
-        self.image_topic = self._get_str_param("image_topic", "/camera/image_raw")
+        self.image_topic = self._get_str_param("image_topic", "/drone/camera/image_raw")
         self.camera_backend = self._get_str_param("camera_backend", "v4l2").strip().lower()
         self.buffer_size = self._get_int_param("buffer_size", 1)
 

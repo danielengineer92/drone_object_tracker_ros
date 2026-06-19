@@ -38,7 +38,7 @@ class FakeDetectionNode(Node):
         self.declare_parameter('detection_dropout_rate', 0.05)
         self.declare_parameter('add_false_detections', True)
         self.declare_parameter('false_detection_rate', 0.1)
-        self.declare_parameter('detections_topic', '/detections')
+        self.declare_parameter('detections_topic', '/drone/vision/detections')
 
         # Read parameters
         self._publish_rate: float = self.get_parameter('publish_rate').value

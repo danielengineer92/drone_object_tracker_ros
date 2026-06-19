@@ -37,7 +37,7 @@ class FakeCameraNode(Node):
         self.declare_parameter('motion_speed', 1.0)
         self.declare_parameter('add_noise', True)
         self.declare_parameter('noise_level', 10)
-        self.declare_parameter('image_topic', '/camera/image_raw')
+        self.declare_parameter('image_topic', '/drone/camera/image_raw')
         self.declare_parameter('frame_id', 'camera_optical_frame')
 
         # Read parameters

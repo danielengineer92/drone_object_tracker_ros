@@ -1,30 +1,31 @@
 """
-Small autonomy state machine for the drone vision system.
+Mission/autonomy state machine for the drone vision system.
 
 This node is the central decision-maker for when tracking autonomy is allowed.
 It does not talk directly to PX4 and it does not generate movement commands.
 It only publishes the two safety gates already used by the system:
 
 Subscribes:
-    /autonomy_request          std_msgs/Bool
-    /target_error              drone_interfaces/TargetError
+    /drone/autonomy/request          std_msgs/Bool
+    /drone/tracking/target_error              drone_interfaces/TargetError
     /drone/telemetry           drone_interfaces/DroneTelemetry
 
 Publishes:
-    /autonomy_state            std_msgs/String
-    /autonomy_enable           std_msgs/Bool
-    /mavsdk_offboard_enable    std_msgs/Bool
+    /drone/autonomy/state            std_msgs/String
+    /drone/mission/state             std_msgs/String
+    /drone/autonomy/enabled          std_msgs/Bool
+    /drone/mavsdk/offboard_enable    std_msgs/Bool
 
-Design:
-    - DISABLED: operator/RC has not requested autonomy
-    - REQUESTED: autonomy was requested, but vehicle safety preconditions are not met yet
+Mission states:
+    - STANDBY: operator/RC has not requested autonomy
+    - PREFLIGHT_BLOCKED: autonomy is requested, but safety preconditions are not met
     - READY: request is on and vehicle is safe, but target is not locked yet
     - TRACKING: request is on, vehicle is safe, target is locked/fresh
     - TARGET_LOST: request is on, vehicle is safe, but target was lost/stale
     - FAILSAFE: autonomy was already ready/active, then a safety check failed
 
-Only TRACKING publishes /autonomy_enable true.
-By default, READY/TRACKING/TARGET_LOST publish /mavsdk_offboard_enable true so the
+Only TRACKING publishes /drone/autonomy/enabled true.
+By default, READY/TRACKING/TARGET_LOST publish /drone/mavsdk/offboard_enable true so the
 MAVSDK bridge is allowed to prepare/use Offboard while control_node still decides
 whether a real movement command is valid.
 """
@@ -44,13 +45,17 @@ from drone_diagnostics.node_diagnostics import NodeDiagnostics
 from drone_interfaces.msg import DroneTelemetry, TargetError
 
 
-class AutonomyState(str, Enum):
-    DISABLED = "DISABLED"
-    REQUESTED = "REQUESTED"
+class MissionState(str, Enum):
+    STANDBY = "STANDBY"
+    PREFLIGHT_BLOCKED = "PREFLIGHT_BLOCKED"
     READY = "READY"
     TRACKING = "TRACKING"
     TARGET_LOST = "TARGET_LOST"
     FAILSAFE = "FAILSAFE"
+
+
+# Backward-compatible alias for older code/comments that still say autonomy state.
+AutonomyState = MissionState
 
 
 class AutonomyManagerNode(Node):
@@ -60,12 +65,13 @@ class AutonomyManagerNode(Node):
         super().__init__("autonomy_manager_node")
 
         # Topics
-        self.declare_parameter("autonomy_request_topic", "/autonomy_request")
-        self.declare_parameter("target_error_topic", "/target_error")
+        self.declare_parameter("autonomy_request_topic", "/drone/autonomy/request")
+        self.declare_parameter("target_error_topic", "/drone/tracking/target_error")
         self.declare_parameter("telemetry_topic", "/drone/telemetry")
-        self.declare_parameter("autonomy_enable_topic", "/autonomy_enable")
-        self.declare_parameter("offboard_enable_topic", "/mavsdk_offboard_enable")
-        self.declare_parameter("autonomy_state_topic", "/autonomy_state")
+        self.declare_parameter("autonomy_enable_topic", "/drone/autonomy/enabled")
+        self.declare_parameter("offboard_enable_topic", "/drone/mavsdk/offboard_enable")
+        self.declare_parameter("autonomy_state_topic", "/drone/autonomy/state")
+        self.declare_parameter("mission_state_topic", "/drone/mission/state")
 
         # Behavior
         self.declare_parameter("manager_enabled", True)
@@ -90,6 +96,7 @@ class AutonomyManagerNode(Node):
         self.autonomy_enable_topic = str(self.get_parameter("autonomy_enable_topic").value)
         self.offboard_enable_topic = str(self.get_parameter("offboard_enable_topic").value)
         self.autonomy_state_topic = str(self.get_parameter("autonomy_state_topic").value)
+        self.mission_state_topic = str(self.get_parameter("mission_state_topic").value)
 
         self.manager_enabled = bool(self.get_parameter("manager_enabled").value)
         self.autonomy_requested = bool(self.get_parameter("initial_autonomy_request").value)
@@ -108,8 +115,8 @@ class AutonomyManagerNode(Node):
 
         self._validate_parameters()
 
-        self.state = AutonomyState.DISABLED
-        self.last_state = AutonomyState.DISABLED
+        self.state = MissionState.STANDBY
+        self.last_state = MissionState.STANDBY
         self.state_reason = "startup"
         self.had_target_lock = False
         self.had_safe_autonomy = False
@@ -155,6 +162,7 @@ class AutonomyManagerNode(Node):
         self.autonomy_enable_pub = self.create_publisher(Bool, self.autonomy_enable_topic, qos)
         self.offboard_enable_pub = self.create_publisher(Bool, self.offboard_enable_topic, qos)
         self.state_pub = self.create_publisher(String, self.autonomy_state_topic, qos)
+        self.mission_state_pub = self.create_publisher(String, self.mission_state_topic, qos)
 
         self.timer = self.create_timer(1.0 / self.publish_rate, self.update_state_machine)
         self.status_timer = self.create_timer(5.0, self.report_status)
@@ -166,10 +174,12 @@ class AutonomyManagerNode(Node):
         self.diagnostics.add_output(self.autonomy_enable_topic, "autonomy_enable")
         self.diagnostics.add_output(self.offboard_enable_topic, "mavsdk_offboard_enable")
         self.diagnostics.add_output(self.autonomy_state_topic, "autonomy_state")
+        self.diagnostics.add_output(self.mission_state_topic, "mission_state")
 
         self.get_logger().warning(
             "Autonomy manager started | "
             f"request_topic={self.autonomy_request_topic}, state_topic={self.autonomy_state_topic}, "
+            f"mission_state_topic={self.mission_state_topic}, "
             f"autonomy_enable_topic={self.autonomy_enable_topic}, "
             f"offboard_enable_topic={self.offboard_enable_topic}, "
             f"manager_enabled={self.manager_enabled}, initial_request={self.autonomy_requested}, "
@@ -201,9 +211,9 @@ class AutonomyManagerNode(Node):
         if not self.autonomy_requested:
             self.had_target_lock = False
             self.had_safe_autonomy = False
-            self.get_logger().warning("Autonomy request OFF; state machine will force DISABLED and publish zero gates.")
+            self.get_logger().warning("Autonomy request OFF; mission state will force STANDBY and publish zero gates.")
         else:
-            self.get_logger().warning("Autonomy request ON; entering REQUESTED until telemetry safety passes.")
+            self.get_logger().warning("Autonomy request ON; entering PREFLIGHT/READY once telemetry safety passes.")
 
     def target_error_callback(self, msg: TargetError) -> None:
         self.last_target_error = msg
@@ -286,49 +296,49 @@ class AutonomyManagerNode(Node):
 
         return True, "SAFETY_OK"
 
-    def _decide_state(self, now: float) -> tuple[AutonomyState, str]:
+    def _decide_state(self, now: float) -> tuple[MissionState, str]:
         if not self.manager_enabled:
-            return AutonomyState.DISABLED, "MANAGER_DISABLED"
+            return MissionState.STANDBY, "MANAGER_DISABLED"
 
         if not self._request_is_fresh(now):
             if self.autonomy_requested and self.request_timeout > 0.0:
                 age = now - self.last_request_time
-                return AutonomyState.DISABLED, f"REQUEST_STALE ({age:.2f}s)"
-            return AutonomyState.DISABLED, "REQUEST_OFF"
+                return MissionState.STANDBY, f"REQUEST_STALE ({age:.2f}s)"
+            return MissionState.STANDBY, "REQUEST_OFF"
 
         safety_ok, safety_reason = self._telemetry_safety_ok(now)
         if not safety_ok:
             if self.had_safe_autonomy or self.state in (
-                AutonomyState.READY,
-                AutonomyState.TRACKING,
-                AutonomyState.TARGET_LOST,
+                MissionState.READY,
+                MissionState.TRACKING,
+                MissionState.TARGET_LOST,
             ):
-                return AutonomyState.FAILSAFE, safety_reason
-            return AutonomyState.REQUESTED, safety_reason
+                return MissionState.FAILSAFE, safety_reason
+            return MissionState.PREFLIGHT_BLOCKED, safety_reason
 
         if self._target_locked(now):
-            return AutonomyState.TRACKING, "TARGET_LOCKED"
+            return MissionState.TRACKING, "TARGET_LOCKED"
 
         if self.had_target_lock:
-            return AutonomyState.TARGET_LOST, "TARGET_LOST_OR_STALE"
+            return MissionState.TARGET_LOST, "TARGET_LOST_OR_STALE"
 
-        return AutonomyState.READY, "WAITING_FOR_TARGET_LOCK"
+        return MissionState.READY, "WAITING_FOR_TARGET_LOCK"
 
-    def _publish_gates(self, state: AutonomyState, reason: str) -> None:
+    def _publish_gates(self, state: MissionState, reason: str) -> None:
         # Only TRACKING allows control_node to generate real movement commands.
-        autonomy_enabled = state == AutonomyState.TRACKING
+        autonomy_enabled = state == MissionState.TRACKING
 
         # Let the MAVSDK executor be ready while requested and safe, but keep actual
-        # movement blocked by /autonomy_enable until TRACKING. REQUESTED is not safe yet.
+        # movement blocked by /drone/autonomy/enabled until TRACKING. PREFLIGHT_BLOCKED is not safe yet.
         offboard_enabled = False
         if self.enable_offboard_when_ready:
             offboard_enabled = state in (
-                AutonomyState.READY,
-                AutonomyState.TRACKING,
-                AutonomyState.TARGET_LOST,
+                MissionState.READY,
+                MissionState.TRACKING,
+                MissionState.TARGET_LOST,
             )
         else:
-            offboard_enabled = state == AutonomyState.TRACKING
+            offboard_enabled = state == MissionState.TRACKING
 
         autonomy_msg = Bool()
         autonomy_msg.data = bool(autonomy_enabled)
@@ -348,15 +358,15 @@ class AutonomyManagerNode(Node):
             summary=f"enabled={offboard_enabled}, state={state.value}, reason={reason}",
         )
 
-    def _publish_state(self, state: AutonomyState, reason: str) -> None:
+    def _publish_state(self, state: MissionState, reason: str) -> None:
         msg = String()
         msg.data = f"{state.value}: {reason}"
         self.state_pub.publish(msg)
+        self.mission_state_pub.publish(msg)
         self.state_publish_count += 1
-        self.diagnostics.mark_published(
-            self.autonomy_state_topic,
-            summary=f"messages={self.state_publish_count}, state={state.value}, reason={reason}",
-        )
+        summary = f"messages={self.state_publish_count}, state={state.value}, reason={reason}"
+        self.diagnostics.mark_published(self.autonomy_state_topic, summary=summary)
+        self.diagnostics.mark_published(self.mission_state_topic, summary=summary)
 
     def update_state_machine(self) -> None:
         now = time.monotonic()
@@ -365,9 +375,9 @@ class AutonomyManagerNode(Node):
         self.state = new_state
         self.state_reason = reason
 
-        if self.state in (AutonomyState.READY, AutonomyState.TRACKING, AutonomyState.TARGET_LOST):
+        if self.state in (MissionState.READY, MissionState.TRACKING, MissionState.TARGET_LOST):
             self.had_safe_autonomy = True
-        elif self.state == AutonomyState.DISABLED:
+        elif self.state == MissionState.STANDBY:
             self.had_safe_autonomy = False
 
         if self.state != self.last_state:

@@ -2,10 +2,10 @@
 YOLO object detection node for the drone vision system.
 
 Subscribes:
-    /camera/image_raw
+    /drone/camera/image_raw
 
 Publishes:
-    /detections
+    /drone/vision/detections
 """
 
 import time
@@ -36,8 +36,8 @@ class YoloNode(Node):
         self.declare_parameter("half_precision", False)
         self.declare_parameter("verbose", False)
         self.declare_parameter("target_class", "")
-        self.declare_parameter("image_topic", "/camera/image_raw")
-        self.declare_parameter("detections_topic", "/detections")
+        self.declare_parameter("image_topic", "/drone/camera/image_raw")
+        self.declare_parameter("detections_topic", "/drone/vision/detections")
         self.declare_parameter("process_every_n_frames", 1)
 
         self.model_path = self.get_parameter("model_path").value
