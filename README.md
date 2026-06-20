@@ -244,3 +244,19 @@ drone_ws/
 ├── simulation_launch.py
 ├── vision_launch.py
 └── full_system_launch.py
+
+## Smart mission flow
+
+The dashboard now exposes a pilot-facing flow instead of raw internal gates:
+
+```text
+System Ready -> Start Mission -> Abort/Hold -> Land
+```
+
+`Start Mission` publishes `/drone/mission/request=true`. The mission executor then owns:
+
+```text
+PREFLIGHT -> TAKEOFF if needed -> PRIME_OFFBOARD -> TRACK_CENTER
+```
+
+`TRACK_CENTER` is yaw-only target centering. Approach/orbit/RTL/land remain later mission steps and are disabled by default with `run_full_orbit_after_track_center: false`.

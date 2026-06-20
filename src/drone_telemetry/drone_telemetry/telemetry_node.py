@@ -46,6 +46,7 @@ BRIDGE_LOW_BATTERY = "PX4_LOW_BATTERY"
 BRIDGE_READY = "READY_TO_SEND"
 BRIDGE_SENT = "SENT_TO_PX4"
 BRIDGE_ZERO_SENT = "ZERO_SENT_TO_PX4"
+BRIDGE_PRIMING = "PRIMING_OFFBOARD_ZERO_SETPOINTS"
 BRIDGE_OFFBOARD_STARTED = "OFFBOARD_STARTED"
 BRIDGE_OFFBOARD_STOPPED = "OFFBOARD_STOPPED"
 BRIDGE_OFFBOARD_START_FAILED = "OFFBOARD_START_FAILED"
@@ -690,11 +691,40 @@ class TelemetryNode(Node):
                 continue
 
             if not decision['valid']:
-                if self._offboard_active:
-                    await self._send_velocity_body(drone, zero_setpoint, BRIDGE_ZERO_SENT, is_zero=True)
+                if decision.get('prime_ok', False):
+                    if not self._offboard_active:
+                        try:
+                            # PX4 Offboard wants a setpoint stream before/while switching modes.
+                            # Start it with zero body velocity so the mission can prime Offboard
+                            # before the target lock produces real yaw commands.
+                            await drone.offboard.set_velocity_body(zero_setpoint)
+                            await drone.offboard.start()
+                            self._offboard_active = True
+                            self.get_logger().warning('*** PX4 OFFBOARD PRIMED with zero setpoints ***')
+                            self._publish_command_status(BRIDGE_PRIMING, force=True)
+                        except OffboardError as exc:
+                            result = getattr(getattr(exc, '_result', None), 'result', exc)
+                            self._publish_command_status(f'{BRIDGE_OFFBOARD_START_FAILED}: {result}', force=True)
+                            self._log_throttled(
+                                'offboard_prime_failed',
+                                'warning',
+                                f'Offboard prime failed: {result}. Keep PX4 armed/airborne and keep setpoints flowing.',
+                                2.0,
+                            )
+                            await asyncio.sleep(period)
+                            continue
+                    await self._send_velocity_body(
+                        drone,
+                        zero_setpoint,
+                        f'{BRIDGE_ZERO_SENT}: {decision["reason"]}',
+                        is_zero=True,
+                    )
                 else:
-                    self._publish_command_status(str(decision['reason']))
-                    self._log_throttled('offboard_blocked', 'info', f'Offboard blocked: {decision["reason"]}', 2.0)
+                    if self._offboard_active:
+                        await self._send_velocity_body(drone, zero_setpoint, BRIDGE_ZERO_SENT, is_zero=True)
+                    else:
+                        self._publish_command_status(str(decision['reason']))
+                        self._log_throttled('offboard_blocked', 'info', f'Offboard blocked: {decision["reason"]}', 2.0)
                 await asyncio.sleep(period)
                 continue
 
@@ -774,6 +804,7 @@ class TelemetryNode(Node):
         decision = {
             'executor_enabled': self._mavsdk_offboard_enabled,
             'valid': False,
+            'prime_ok': False,
             'reason': BRIDGE_DISABLED,
             'forward_m_s': 0.0,
             'right_m_s': 0.0,
@@ -785,6 +816,23 @@ class TelemetryNode(Node):
 
         if not self._mavsdk_offboard_enabled:
             return decision
+
+        if not self._connected:
+            decision['reason'] = BRIDGE_NOT_CONNECTED
+            return decision
+
+        if self._require_armed_for_offboard and not armed:
+            decision['reason'] = BRIDGE_NOT_ARMED
+            return decision
+
+        if battery_remaining > 0.0 and battery_remaining < self._min_battery_percent:
+            decision['reason'] = f'{BRIDGE_LOW_BATTERY}: {battery_remaining:.1f}%'
+            return decision
+
+        # Once the executor gate is true and PX4 is safe, allow zero-setpoint
+        # Offboard priming even before the control node has a real yaw command.
+        # This removes the dashboard button-race and keeps PX4 fed with valid setpoints.
+        decision['prime_ok'] = True
 
         if command is None:
             decision['reason'] = BRIDGE_NO_COMMAND
@@ -804,18 +852,6 @@ class TelemetryNode(Node):
                 f'{BRIDGE_COMMAND_NOT_APPROVED}: executed={command.executed}, '
                 f'status={command.execution_status}'
             )
-            return decision
-
-        if not self._connected:
-            decision['reason'] = BRIDGE_NOT_CONNECTED
-            return decision
-
-        if self._require_armed_for_offboard and not armed:
-            decision['reason'] = BRIDGE_NOT_ARMED
-            return decision
-
-        if battery_remaining > 0.0 and battery_remaining < self._min_battery_percent:
-            decision['reason'] = f'{BRIDGE_LOW_BATTERY}: {battery_remaining:.1f}%'
             return decision
 
         yaw_rate_rad_s = self._clamp(

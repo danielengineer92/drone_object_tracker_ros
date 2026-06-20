@@ -126,22 +126,32 @@ autonomy_manager_node:
 
 mission_executor_node:
   ros__parameters:
-    mission_enabled: false
+    # Smart mission is enabled, but TAKEOFF/LAND/RTL still require telemetry_node.allow_mavsdk_actions.
+    mission_enabled: true
     auto_start: false
     mission_request_topic: "/drone/mission/request"
     mission_command_topic: "/drone/mission/command"
     mission_state_topic: "/drone/mission/state"
     mavsdk_action_topic: "/drone/mavsdk/action_command"
+    autonomy_request_topic: "/drone/autonomy/request"
+    offboard_request_topic: "/drone/mavsdk/offboard_request"
     target_error_topic: "/drone/tracking/target_error"
     telemetry_topic: "/drone/telemetry"
     publish_rate: 10.0
 
-    # Ball orbit return mission:
-    # 1 takeoff, 2 fly forward, 3 detect ball, 4 approach, 5 orbit, 6 RTL, 7 land.
+    # Smart mission:
+    # Start Mission -> preflight -> takeoff if needed -> prime Offboard -> TRACK_CENTER yaw.
+    require_connected_for_mission: true
+    require_armed_for_mission: true
+    telemetry_timeout_s: 2.0
     takeoff_altitude_m: 2.0
-    fly_forward_speed_m_s: 0.4
-    fly_forward_duration_s: 3.0
-    wait_for_target_timeout_s: 20.0
+    airborne_altitude_m: 0.75
+    takeoff_timeout_s: 20.0
+    offboard_prime_time_s: 1.5
+    track_center_timeout_s: 0.0
+    run_full_orbit_after_track_center: false
+
+    # Later orbit/return mission knobs. Disabled until run_full_orbit_after_track_center=true.
     target_timeout_s: 2.0
     desired_approach_distance_m: 2.0
     approach_distance_tolerance_m: 0.25
@@ -251,6 +261,7 @@ health_monitor_node:
     telemetry_topic: "/drone/telemetry"
     control_command_topic: "/drone/control/command"
     mavsdk_command_status_topic: "/drone/mavsdk/command_status"
+    mavsdk_action_topic: "/drone/mavsdk/action_command"
     monitor_mavsdk_command_status: true
     heartbeat_period: 2.0
     stale_seconds: 2.0
@@ -272,3 +283,4 @@ dashboard_node:
     autonomy_state_topic: "/drone/autonomy/state"
     mission_state_topic: "/drone/mission/state"
     mavsdk_command_status_topic: "/drone/mavsdk/command_status"
+    mavsdk_action_topic: "/drone/mavsdk/action_command"

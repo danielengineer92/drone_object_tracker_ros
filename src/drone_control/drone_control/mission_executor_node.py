@@ -1,14 +1,24 @@
 """
-Mission executor node for the ball orbit return mission.
+Smart mission executor node for the PX4/ROS 2 object-tracking drone.
 
-This node sequences high-level steps and publishes intent. It does not directly
-push motor setpoints. Low-level motion remains gated by control_node, and MAVSDK
-actions remain gated inside telemetry_node.
+Operator intent is now simple:
+    System Ready     -> autonomy request true
+    Start Mission    -> this node owns the sequence
+    Abort / Hold     -> stop mission motion and request HOLD
+    Land             -> request LAND through the MAVSDK action gate
 
-Default safety posture:
-- mission_enabled defaults to False
-- MAVSDK actions requested here are one-shot requests and may be rejected by telemetry_node
-- control_node still requires /drone/autonomy/enabled and its telemetry gates
+Start Mission sequence:
+    1. Check telemetry connected/fresh
+    2. Check PX4 is armed
+    3. If landed or below the airborne threshold, request TAKEOFF
+    4. Wait until airborne
+    5. Request MAVSDK Offboard through the autonomy manager
+    6. Prime Offboard with zero/HOLD setpoints
+    7. Publish TRACK_CENTER so the control node can yaw toward the YOLO target
+
+This node does not arm the vehicle. MAVSDK actions are still gated by telemetry_node
+through allow_mavsdk_actions, so real hardware can keep those actions disabled while
+SITL/dev setups can enable them intentionally.
 """
 
 from __future__ import annotations
@@ -30,9 +40,10 @@ from drone_diagnostics.node_diagnostics import NodeDiagnostics
 class MissionState(Enum):
     DISABLED = "DISABLED"
     IDLE = "IDLE"
+    PREFLIGHT = "PREFLIGHT"
     TAKEOFF = "TAKEOFF"
-    FLY_FORWARD = "FLY_FORWARD"
-    WAIT_FOR_TARGET = "WAIT_FOR_TARGET"
+    PRIME_OFFBOARD = "PRIME_OFFBOARD"
+    TRACK_CENTER = "TRACK_CENTER"
     APPROACH_TARGET = "APPROACH_TARGET"
     DO_ORBIT = "DO_ORBIT"
     RETURN_TO_LAUNCH = "RETURN_TO_LAUNCH"
@@ -42,12 +53,13 @@ class MissionState(Enum):
 
 
 STEP_NAMES = {
-    MissionState.TAKEOFF: "1_takeoff",
-    MissionState.FLY_FORWARD: "2_fly_forward",
-    MissionState.WAIT_FOR_TARGET: "3_detect_ball",
-    MissionState.APPROACH_TARGET: "4_approach_ball",
-    MissionState.DO_ORBIT: "5_orbit_ball",
-    MissionState.RETURN_TO_LAUNCH: "6_return_home",
+    MissionState.PREFLIGHT: "0_preflight",
+    MissionState.TAKEOFF: "1_takeoff_if_needed",
+    MissionState.PRIME_OFFBOARD: "2_prime_offboard",
+    MissionState.TRACK_CENTER: "3_track_center_yaw",
+    MissionState.APPROACH_TARGET: "4_approach_ball_later",
+    MissionState.DO_ORBIT: "5_orbit_ball_later",
+    MissionState.RETURN_TO_LAUNCH: "6_return_home_later",
     MissionState.LAND: "7_land",
 }
 
@@ -62,16 +74,25 @@ class MissionExecutorNode(Node):
         self.declare_parameter("mission_command_topic", "/drone/mission/command")
         self.declare_parameter("mission_state_topic", "/drone/mission/state")
         self.declare_parameter("mavsdk_action_topic", "/drone/mavsdk/action_command")
+        self.declare_parameter("autonomy_request_topic", "/drone/autonomy/request")
+        self.declare_parameter("offboard_request_topic", "/drone/mavsdk/offboard_request")
         self.declare_parameter("target_error_topic", "/drone/tracking/target_error")
         self.declare_parameter("telemetry_topic", "/drone/telemetry")
         self.declare_parameter("publish_rate", 10.0)
 
-        # Mission behavior parameters.
+        # Smart mission behavior.
+        self.declare_parameter("require_connected_for_mission", True)
+        self.declare_parameter("require_armed_for_mission", True)
+        self.declare_parameter("telemetry_timeout_s", 2.0)
         self.declare_parameter("takeoff_altitude_m", 2.0)
-        self.declare_parameter("fly_forward_speed_m_s", 0.4)
-        self.declare_parameter("fly_forward_duration_s", 3.0)
+        self.declare_parameter("airborne_altitude_m", 0.75)
+        self.declare_parameter("takeoff_timeout_s", 20.0)
+        self.declare_parameter("offboard_prime_time_s", 1.5)
+        self.declare_parameter("track_center_timeout_s", 0.0)  # 0 = keep yaw tracking until stopped.
+        self.declare_parameter("run_full_orbit_after_track_center", False)
+
+        # Later/full mission behavior parameters. Kept so the old orbit path can be re-enabled later.
         self.declare_parameter("target_timeout_s", 2.0)
-        self.declare_parameter("wait_for_target_timeout_s", 20.0)
         self.declare_parameter("desired_approach_distance_m", 2.0)
         self.declare_parameter("approach_distance_tolerance_m", 0.25)
         self.declare_parameter("approach_timeout_s", 20.0)
@@ -92,15 +113,23 @@ class MissionExecutorNode(Node):
         self.mission_command_topic = str(self.get_parameter("mission_command_topic").value)
         self.mission_state_topic = str(self.get_parameter("mission_state_topic").value)
         self.mavsdk_action_topic = str(self.get_parameter("mavsdk_action_topic").value)
+        self.autonomy_request_topic = str(self.get_parameter("autonomy_request_topic").value)
+        self.offboard_request_topic = str(self.get_parameter("offboard_request_topic").value)
         self.target_error_topic = str(self.get_parameter("target_error_topic").value)
         self.telemetry_topic = str(self.get_parameter("telemetry_topic").value)
         self.publish_rate = max(1.0, float(self.get_parameter("publish_rate").value))
 
+        self.require_connected_for_mission = bool(self.get_parameter("require_connected_for_mission").value)
+        self.require_armed_for_mission = bool(self.get_parameter("require_armed_for_mission").value)
+        self.telemetry_timeout_s = float(self.get_parameter("telemetry_timeout_s").value)
         self.takeoff_altitude_m = float(self.get_parameter("takeoff_altitude_m").value)
-        self.fly_forward_speed_m_s = float(self.get_parameter("fly_forward_speed_m_s").value)
-        self.fly_forward_duration_s = float(self.get_parameter("fly_forward_duration_s").value)
+        self.airborne_altitude_m = float(self.get_parameter("airborne_altitude_m").value)
+        self.takeoff_timeout_s = float(self.get_parameter("takeoff_timeout_s").value)
+        self.offboard_prime_time_s = float(self.get_parameter("offboard_prime_time_s").value)
+        self.track_center_timeout_s = float(self.get_parameter("track_center_timeout_s").value)
+        self.run_full_orbit_after_track_center = bool(self.get_parameter("run_full_orbit_after_track_center").value)
+
         self.target_timeout_s = float(self.get_parameter("target_timeout_s").value)
-        self.wait_for_target_timeout_s = float(self.get_parameter("wait_for_target_timeout_s").value)
         self.desired_approach_distance_m = float(self.get_parameter("desired_approach_distance_m").value)
         self.approach_distance_tolerance_m = float(self.get_parameter("approach_distance_tolerance_m").value)
         self.approach_timeout_s = float(self.get_parameter("approach_timeout_s").value)
@@ -120,6 +149,10 @@ class MissionExecutorNode(Node):
         self.mission_active = bool(self.auto_start and self.mission_enabled)
         self.action_command_id = 0
         self.actions_sent: set[str] = set()
+        self._last_autonomy_request: Optional[bool] = None
+        self._last_offboard_request: Optional[bool] = None
+        self._last_autonomy_request_publish_time = 0.0
+        self._last_offboard_request_publish_time = 0.0
 
         self.last_target: Optional[TargetError] = None
         self.last_target_time = 0.0
@@ -133,41 +166,54 @@ class MissionExecutorNode(Node):
         self.command_pub = self.create_publisher(MissionCommand, self.mission_command_topic, qos)
         self.state_pub = self.create_publisher(String, self.mission_state_topic, qos)
         self.action_pub = self.create_publisher(MavsdkActionCommand, self.mavsdk_action_topic, qos)
+        self.autonomy_request_pub = self.create_publisher(Bool, self.autonomy_request_topic, qos)
+        self.offboard_request_pub = self.create_publisher(Bool, self.offboard_request_topic, qos)
 
         self.timer = self.create_timer(1.0 / self.publish_rate, self.loop)
         self.diagnostics = NodeDiagnostics(self, heartbeat_period=5.0, stale_seconds=2.0)
         self.diagnostics.add_input(self.mission_request_topic, "mission_request", stale_seconds=60.0)
         self.diagnostics.add_input(self.target_error_topic, "target_error", stale_seconds=self.target_timeout_s)
-        self.diagnostics.add_input(self.telemetry_topic, "telemetry", stale_seconds=2.0)
+        self.diagnostics.add_input(self.telemetry_topic, "telemetry", stale_seconds=self.telemetry_timeout_s)
         self.diagnostics.add_output(self.mission_command_topic, "mission_command")
         self.diagnostics.add_output(self.mission_state_topic, "mission_state")
         self.diagnostics.add_output(self.mavsdk_action_topic, "mavsdk_action_command")
+        self.diagnostics.add_output(self.autonomy_request_topic, "autonomy_request")
+        self.diagnostics.add_output(self.offboard_request_topic, "mavsdk_offboard_request")
 
         self.get_logger().warning(
             f"Mission executor started | enabled={self.mission_enabled}, active={self.mission_active}, "
             f"request_topic={self.mission_request_topic}, state_topic={self.mission_state_topic}, "
-            f"command_topic={self.mission_command_topic}, mavsdk_action_topic={self.mavsdk_action_topic}"
+            f"command_topic={self.mission_command_topic}, mavsdk_action_topic={self.mavsdk_action_topic}, "
+            f"autonomy_request_topic={self.autonomy_request_topic}, offboard_request_topic={self.offboard_request_topic}, "
+            f"takeoff_altitude={self.takeoff_altitude_m:.1f}m, airborne_altitude={self.airborne_altitude_m:.1f}m"
         )
         if not self.mission_enabled:
-            self.get_logger().warning("Mission executor is disabled by parameter. It will publish IDLE until enabled in config.")
+            self.get_logger().warning("Mission executor is disabled by parameter. Start Mission will stay DISABLED until enabled in config.")
 
     def mission_request_callback(self, msg: Bool) -> None:
-        if bool(msg.data):
+        requested = bool(msg.data)
+        if requested:
             if not self.mission_enabled:
                 self.get_logger().warning("Mission start requested but mission_enabled is false; staying DISABLED.")
                 self.state = MissionState.DISABLED
                 self.mission_active = False
+                self.publish_autonomy_request(False)
+                self.publish_offboard_request(False)
                 return
-            self.get_logger().warning("*** BALL ORBIT RETURN MISSION REQUESTED ***")
+            self.get_logger().warning("*** SMART YOLO TRACK-CENTER MISSION REQUESTED ***")
             self.mission_active = True
             self.actions_sent.clear()
-            self.transition(MissionState.TAKEOFF)
+            self.publish_autonomy_request(True)
+            self.publish_offboard_request(False)
+            self.transition(MissionState.PREFLIGHT)
         else:
-            self.get_logger().warning("Mission stop requested; publishing HOLD/IDLE.")
+            self.get_logger().warning("Mission stop requested; publishing HOLD/IDLE and dropping autonomy/offboard requests.")
             self.mission_active = False
             self.actions_sent.clear()
+            self.publish_offboard_request(False)
+            self.publish_autonomy_request(False)
             self.transition(MissionState.IDLE if self.mission_enabled else MissionState.DISABLED)
-        self.diagnostics.mark_received(self.mission_request_topic, summary=f"request={msg.data}, active={self.mission_active}")
+        self.diagnostics.mark_received(self.mission_request_topic, summary=f"request={requested}, active={self.mission_active}")
 
     def target_callback(self, msg: TargetError) -> None:
         self.last_target = msg
@@ -182,8 +228,41 @@ class MissionExecutorNode(Node):
         self.last_telemetry_time = time.time()
         self.diagnostics.mark_received(
             self.telemetry_topic,
-            summary=f"connected={msg.connected}, armed={msg.armed}, mode={msg.flight_mode}, alt={msg.relative_altitude:.1f}",
+            summary=(
+                f"connected={msg.connected}, armed={msg.armed}, mode={msg.flight_mode}, "
+                f"landed={msg.landed_state}, alt={msg.relative_altitude:.2f}"
+            ),
         )
+
+    def publish_autonomy_request(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        now = time.time()
+        changed = self._last_autonomy_request != enabled
+        if not changed and now - self._last_autonomy_request_publish_time < 1.0:
+            return
+        self._last_autonomy_request = enabled
+        self._last_autonomy_request_publish_time = now
+        msg = Bool()
+        msg.data = enabled
+        self.autonomy_request_pub.publish(msg)
+        self.diagnostics.mark_published(self.autonomy_request_topic, summary=f"requested={enabled}")
+        if changed:
+            self.get_logger().warning(f"Mission executor autonomy request: {enabled}")
+
+    def publish_offboard_request(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        now = time.time()
+        changed = self._last_offboard_request != enabled
+        if not changed and now - self._last_offboard_request_publish_time < 1.0:
+            return
+        self._last_offboard_request = enabled
+        self._last_offboard_request_publish_time = now
+        msg = Bool()
+        msg.data = enabled
+        self.offboard_request_pub.publish(msg)
+        self.diagnostics.mark_published(self.offboard_request_topic, summary=f"requested={enabled}")
+        if changed:
+            self.get_logger().warning(f"Mission executor MAVSDK Offboard request: {enabled}")
 
     def transition(self, new_state: MissionState) -> None:
         if new_state == self.state:
@@ -194,6 +273,34 @@ class MissionExecutorNode(Node):
 
     def state_age(self) -> float:
         return time.time() - self.state_enter_time
+
+    def telemetry_is_fresh(self) -> bool:
+        if self.last_telemetry is None:
+            return False
+        return time.time() - self.last_telemetry_time <= self.telemetry_timeout_s
+
+    def preflight_ok(self) -> tuple[bool, str]:
+        if self.last_telemetry is None:
+            return False, "NO_TELEMETRY"
+        age = time.time() - self.last_telemetry_time
+        if age > self.telemetry_timeout_s:
+            return False, f"TELEMETRY_STALE ({age:.2f}s)"
+        if self.require_connected_for_mission and not bool(self.last_telemetry.connected):
+            return False, "PX4_NOT_CONNECTED"
+        if self.require_armed_for_mission and not bool(self.last_telemetry.armed):
+            return False, "PX4_NOT_ARMED"
+        return True, "PREFLIGHT_OK"
+
+    def is_airborne(self) -> bool:
+        if self.last_telemetry is None:
+            return False
+        altitude = float(self.last_telemetry.relative_altitude)
+        landed_state = str(self.last_telemetry.landed_state).upper()
+        if "IN_AIR" in landed_state or "TAKING_OFF" in landed_state:
+            return True
+        if "ON_GROUND" in landed_state or "LANDED" in landed_state:
+            return False
+        return altitude >= self.airborne_altitude_m
 
     def target_is_fresh_locked(self) -> bool:
         if self.last_target is None:
@@ -297,9 +404,7 @@ class MissionExecutorNode(Node):
         msg.step_name = STEP_NAMES.get(self.state, self.state.value.lower())
         msg.status = status
 
-        if mode == "FLY_FORWARD":
-            msg.velocity_forward = float(self.fly_forward_speed_m_s)
-        elif mode == "ORBIT_TARGET" and not self.use_mavsdk_do_orbit:
+        if mode == "ORBIT_TARGET" and not self.use_mavsdk_do_orbit:
             msg.velocity_right = float(self.orbit_speed_m_s)
 
         self.command_pub.publish(msg)
@@ -308,22 +413,25 @@ class MissionExecutorNode(Node):
     @staticmethod
     def step_index_for_state(state: MissionState) -> int:
         order = [
+            MissionState.PREFLIGHT,
             MissionState.TAKEOFF,
-            MissionState.FLY_FORWARD,
-            MissionState.WAIT_FOR_TARGET,
+            MissionState.PRIME_OFFBOARD,
+            MissionState.TRACK_CENTER,
             MissionState.APPROACH_TARGET,
             MissionState.DO_ORBIT,
             MissionState.RETURN_TO_LAUNCH,
             MissionState.LAND,
         ]
         try:
-            return order.index(state) + 1
+            return order.index(state)
         except ValueError:
             return 0
 
     def loop(self) -> None:
         if not self.mission_enabled:
             self.state = MissionState.DISABLED
+            self.publish_offboard_request(False)
+            self.publish_autonomy_request(False)
             self.publish_mission_command("IDLE", False, "mission disabled")
             self.publish_state("mission_enabled=false")
             return
@@ -334,42 +442,79 @@ class MissionExecutorNode(Node):
             return
 
         age = self.state_age()
+        self.publish_autonomy_request(True)
+
+        if self.state == MissionState.PREFLIGHT:
+            self.publish_offboard_request(False)
+            self.publish_mission_command("HOLD", True, "checking PX4 link, telemetry, and armed state")
+            ok, reason = self.preflight_ok()
+            if not ok:
+                self.publish_state(f"blocked: {reason}")
+                return
+            if self.is_airborne():
+                self.publish_state("already airborne; skipping takeoff")
+                self.transition(MissionState.PRIME_OFFBOARD)
+            else:
+                self.publish_state("armed on ground/low altitude; requesting takeoff")
+                self.transition(MissionState.TAKEOFF)
+            return
 
         if self.state == MissionState.TAKEOFF:
-            self.send_action_once("takeoff", "TAKEOFF", "step 1 takeoff")
-            self.publish_mission_command("HOLD", True, "takeoff action requested")
-            self.publish_state(f"takeoff requested, age={age:.1f}s")
-            if self.last_telemetry is not None and float(self.last_telemetry.relative_altitude) >= self.takeoff_altitude_m * 0.7:
-                self.transition(MissionState.FLY_FORWARD)
-            elif age > max(8.0, self.takeoff_altitude_m * 3.0):
-                # Allows SITL/dry-run sequencing to continue instead of getting stuck forever.
-                self.transition(MissionState.FLY_FORWARD)
+            ok, reason = self.preflight_ok()
+            if not ok:
+                self.publish_state(f"takeoff blocked: {reason}")
+                self.publish_mission_command("HOLD", True, f"takeoff blocked: {reason}")
+                return
+            self.publish_offboard_request(False)
+            self.send_action_once("takeoff", "TAKEOFF", "smart mission takeoff before Offboard")
+            self.publish_mission_command("HOLD", True, "takeoff action requested; waiting until airborne")
+            self.publish_state(f"takeoff requested, airborne={self.is_airborne()}, age={age:.1f}/{self.takeoff_timeout_s:.1f}s")
+            if self.is_airborne():
+                self.transition(MissionState.PRIME_OFFBOARD)
+            elif age > self.takeoff_timeout_s:
+                # Stay in TAKEOFF instead of yawing on the ground. This catches disabled action gates.
+                self.publish_state("takeoff timeout; still waiting for airborne telemetry")
             return
 
-        if self.state == MissionState.FLY_FORWARD:
-            self.publish_mission_command("FLY_FORWARD", True, "step 2 scripted forward search")
-            self.publish_state(f"flying forward search, age={age:.1f}/{self.fly_forward_duration_s:.1f}s")
-            if age >= self.fly_forward_duration_s:
-                self.transition(MissionState.WAIT_FOR_TARGET)
+        if self.state == MissionState.PRIME_OFFBOARD:
+            ok, reason = self.preflight_ok()
+            if not ok:
+                self.publish_state(f"prime blocked: {reason}")
+                self.publish_mission_command("HOLD", True, f"prime blocked: {reason}")
+                return
+            self.publish_offboard_request(True)
+            self.publish_mission_command("HOLD", True, "priming PX4 Offboard with zero/hold setpoints")
+            self.publish_state(f"priming offboard, age={age:.1f}/{self.offboard_prime_time_s:.1f}s")
+            if age >= self.offboard_prime_time_s:
+                self.transition(MissionState.TRACK_CENTER)
             return
 
-        if self.state == MissionState.WAIT_FOR_TARGET:
-            self.publish_mission_command("TRACK_CENTER", True, "step 3 waiting for ball lock")
-            self.publish_state(f"waiting for target, locked={self.target_is_fresh_locked()}, age={age:.1f}s")
-            if self.target_is_fresh_locked():
+        if self.state == MissionState.TRACK_CENTER:
+            ok, reason = self.preflight_ok()
+            if not ok:
+                self.publish_state(f"track blocked: {reason}")
+                self.publish_mission_command("HOLD", True, f"track blocked: {reason}")
+                return
+            self.publish_offboard_request(True)
+            locked = self.target_is_fresh_locked()
+            self.publish_mission_command("TRACK_CENTER", True, "yaw toward YOLO target; no forward motion")
+            self.publish_state(f"track center yaw, locked={locked}, age={age:.1f}s")
+            if self.run_full_orbit_after_track_center and locked and self.target_centered():
                 self.transition(MissionState.APPROACH_TARGET)
-            elif age > self.wait_for_target_timeout_s:
-                self.transition(MissionState.RETURN_TO_LAUNCH)
+            elif self.track_center_timeout_s > 0.0 and age > self.track_center_timeout_s:
+                self.transition(MissionState.COMPLETE)
             return
 
+        # Later/full mission path. Disabled by default via run_full_orbit_after_track_center=false.
         if self.state == MissionState.APPROACH_TARGET:
-            self.publish_mission_command("APPROACH_TARGET", True, "step 4 approach using distance estimate")
+            self.publish_offboard_request(True)
+            self.publish_mission_command("APPROACH_TARGET", True, "later step: approach using distance estimate")
             dist_text = "none"
             if self.last_target is not None and bool(getattr(self.last_target, "distance_valid", False)):
                 dist_text = f"{self.last_target.distance_m:.2f}m"
             self.publish_state(f"approaching, distance={dist_text}, age={age:.1f}s")
             if not self.target_is_fresh_locked():
-                self.transition(MissionState.WAIT_FOR_TARGET)
+                self.transition(MissionState.TRACK_CENTER)
             elif self.approach_done():
                 self.transition(MissionState.DO_ORBIT)
             elif age > self.approach_timeout_s:
@@ -377,6 +522,7 @@ class MissionExecutorNode(Node):
             return
 
         if self.state == MissionState.DO_ORBIT:
+            self.publish_offboard_request(True)
             if self.require_distance_for_orbit and not self.target_distance_ready():
                 self.publish_mission_command("TRACK_CENTER", True, "waiting for valid distance before orbit")
                 self.publish_state("orbit hold: distance not ready")
@@ -387,7 +533,7 @@ class MissionExecutorNode(Node):
                 return
 
             if self.use_mavsdk_do_orbit:
-                self.send_action_once("do_orbit", "DO_ORBIT", "step 5 MAV_CMD_DO_ORBIT around estimated ball center")
+                self.send_action_once("do_orbit", "DO_ORBIT", "later step: MAV_CMD_DO_ORBIT around estimated ball center")
                 self.publish_mission_command("HOLD", True, "DO_ORBIT requested; PX4 owns orbit if accepted")
             else:
                 self.publish_mission_command("ORBIT_TARGET", True, "visual-servo orbit fallback")
@@ -397,7 +543,8 @@ class MissionExecutorNode(Node):
             return
 
         if self.state == MissionState.RETURN_TO_LAUNCH:
-            self.send_action_once("rtl", "RETURN_TO_LAUNCH", "step 6 return to launch")
+            self.publish_offboard_request(False)
+            self.send_action_once("rtl", "RETURN_TO_LAUNCH", "later step: return to launch")
             self.publish_mission_command("HOLD", True, "RTL requested")
             self.publish_state(f"returning, age={age:.1f}/{self.rtl_wait_s:.1f}s")
             if age > self.rtl_wait_s:
@@ -405,7 +552,8 @@ class MissionExecutorNode(Node):
             return
 
         if self.state == MissionState.LAND:
-            self.send_action_once("land", "LAND", "step 7 land")
+            self.publish_offboard_request(False)
+            self.send_action_once("land", "LAND", "later step: land")
             self.publish_mission_command("HOLD", True, "land requested")
             self.publish_state(f"landing, age={age:.1f}/{self.land_wait_s:.1f}s")
             if age > self.land_wait_s:
@@ -413,17 +561,14 @@ class MissionExecutorNode(Node):
             return
 
         if self.state == MissionState.COMPLETE:
+            self.publish_offboard_request(False)
             self.publish_mission_command("IDLE", False, "mission complete")
             self.publish_state("complete")
             self.mission_active = False
             return
 
         self.publish_mission_command("IDLE", False, f"unhandled state {self.state.value}")
-        self.publish_state("unhandled")
-
-    def destroy_node(self) -> None:
-        self.get_logger().info("Mission executor shut down.")
-        super().destroy_node()
+        self.publish_state(f"unhandled state {self.state.value}")
 
 
 def main(args=None) -> None:

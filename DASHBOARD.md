@@ -84,3 +84,34 @@ curl -X POST http://<pi-ip>:8080/api/mavsdk_request \
 ```
 
 The older autonomy gate endpoint remains `/api/autonomy_request`, which publishes to `/drone/autonomy/request`.
+
+
+## Smart mission UI
+
+The main pilot controls are intentionally simple now:
+
+```text
+System Ready   -> publishes /drone/autonomy/request true
+Start Mission  -> publishes /drone/mission/request true
+Abort / Hold   -> stops mission/autonomy/offboard requests and requests MAVSDK HOLD
+Land           -> stops mission/autonomy/offboard requests and requests MAVSDK LAND
+```
+
+The old low-level gates are still available in the dashboard debug drawer:
+
+```text
+Autonomy Request ON/OFF
+MAVSDK Offboard Request ON/OFF
+Mission Request ON/OFF
+Raw gate states in /api/status
+```
+
+Start Mission is smart: mission_executor_node checks telemetry, requires PX4 armed, requests TAKEOFF only if the vehicle is landed/low, waits for airborne telemetry, requests MAVSDK Offboard, primes zero/hold setpoints, then publishes TRACK_CENTER for YOLO yaw tracking.
+
+MAVSDK actions still pass through telemetry_node and are blocked unless `allow_mavsdk_actions` is true. For SITL/dev launch you can use:
+
+```bash
+ros2 launch drone_bringup full_system_launch.py allow_mavsdk_actions:=true
+```
+
+Keep it false for normal hardware bench tests.

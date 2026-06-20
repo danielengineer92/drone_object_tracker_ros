@@ -143,6 +143,7 @@ health_monitor_node:
     telemetry_topic: "/drone/telemetry"
     control_command_topic: "/drone/control/command"
     mavsdk_command_status_topic: "/drone/mavsdk/command_status"
+    mavsdk_action_topic: "/drone/mavsdk/action_command"
     monitor_mavsdk_command_status: false
     heartbeat_period: 2.0
     stale_seconds: 2.0
@@ -158,7 +159,10 @@ dashboard_node:
     control_command_topic: "/drone/control/command"
     autonomy_request_topic: "/drone/autonomy/request"
     mavsdk_request_topic: "/drone/mavsdk/offboard_request"
+    mission_request_topic: "/drone/mission/request"
     autonomy_enable_topic: "/drone/autonomy/enabled"
     offboard_enable_topic: "/drone/mavsdk/offboard_enable"
     autonomy_state_topic: "/drone/autonomy/state"
+    mission_state_topic: "/drone/mission/state"
     mavsdk_command_status_topic: "/drone/mavsdk/command_status"
+    mavsdk_action_topic: "/drone/mavsdk/action_command"

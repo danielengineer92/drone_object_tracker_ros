@@ -58,6 +58,12 @@ def generate_launch_description() -> LaunchDescription:
         description='MAVSDK connection URL to PX4'
     )
 
+    allow_mavsdk_actions_arg = DeclareLaunchArgument(
+        'allow_mavsdk_actions',
+        default_value='false',
+        description='SITL/dev only: allow mission TAKEOFF/LAND/RTL/HOLD actions through MAVSDK'
+    )
+
 
     dashboard_arg = DeclareLaunchArgument(
         'dashboard',
@@ -106,7 +112,13 @@ def generate_launch_description() -> LaunchDescription:
         package='drone_telemetry',
         executable='telemetry_node',
         name='telemetry_node',
-        parameters=[config_file, {'connection_url': LaunchConfiguration('connection_url')}],
+        parameters=[
+            config_file,
+            {
+                'connection_url': LaunchConfiguration('connection_url'),
+                'allow_mavsdk_actions': ParameterValue(LaunchConfiguration('allow_mavsdk_actions'), value_type=bool),
+            },
+        ],
         output='screen',
     )
 
@@ -173,12 +185,14 @@ def generate_launch_description() -> LaunchDescription:
         model_path_arg,
         target_class_arg,
         connection_url_arg,
+        allow_mavsdk_actions_arg,
         LogInfo(msg='=== DRONE VISION SYSTEM - FULL SYSTEM MODE ==='),
         LogInfo(msg='Real camera + YOLO + PX4 MAVSDK bridge active.'),
         LogInfo(msg=['Dashboard: http://<pi-ip>:', LaunchConfiguration('dashboard_port'), '/']),
         LogInfo(msg='*** autonomy_manager_node owns /drone/autonomy/enabled and /drone/mavsdk/offboard_enable; request MAVSDK on /drone/mavsdk/offboard_request ***'),
-        LogInfo(msg='*** mission_executor_node sequences /drone/mission/command and MAVSDK action requests; disabled by default ***'),
-        LogInfo(msg='*** request autonomy with /drone/autonomy/request; code still stays idle until target + safety gates pass ***'),
+        LogInfo(msg='*** mission_executor_node owns Start Mission: preflight -> takeoff if needed -> prime Offboard -> TRACK_CENTER yaw ***'),
+        LogInfo(msg='*** dashboard main buttons: System Ready, Start Mission, Abort/Hold, Land; debug gates are in the drawer ***'),
+        LogInfo(msg='*** SITL takeoff/land via Start Mission needs: allow_mavsdk_actions:=true. Leave false for normal hardware bench tests. ***'),
         LogInfo(msg="Request autonomy: ros2 topic pub --once /drone/autonomy/request std_msgs/msg/Bool '{data: true}'"),
         LogInfo(msg="Disable autonomy: ros2 topic pub --once /drone/autonomy/request std_msgs/msg/Bool '{data: false}'"),
         camera,

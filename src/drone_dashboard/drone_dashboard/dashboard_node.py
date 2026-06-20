@@ -12,6 +12,8 @@ It can also publish operator requests through:
     POST /api/autonomy_request {"enabled": true|false}
     POST /api/mavsdk_request {"enabled": true|false}
     POST /api/mission_request {"enabled": true|false}
+    POST /api/abort_hold {"enabled": true}
+    POST /api/land {"enabled": true}
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, String
 
 from drone_diagnostics.node_diagnostics import NodeDiagnostics
-from drone_interfaces.msg import ControlCommand, DetectionArray, DroneTelemetry, TargetError
+from drone_interfaces.msg import ControlCommand, DetectionArray, DroneTelemetry, MavsdkActionCommand, TargetError
 
 
 DASHBOARD_HTML = r"""<!doctype html>
@@ -220,6 +222,24 @@ DASHBOARD_HTML = r"""<!doctype html>
     button:hover { transform: translateY(-2px); filter: brightness(1.08); }
     .enable { background: linear-gradient(135deg, var(--green), var(--cyan)); }
     .disable { background: linear-gradient(135deg, var(--red), var(--yellow)); }
+    .hold { background: linear-gradient(135deg, var(--yellow), var(--cyan)); }
+    .pilotButtons button { font-size: 14px; min-width: 150px; }
+    .debugDrawer {
+      margin-top: 12px;
+      border: 1px solid rgba(255,255,255,.10);
+      border-radius: 14px;
+      padding: 10px 12px;
+      background: rgba(255,255,255,.035);
+    }
+    .debugDrawer summary {
+      cursor: pointer;
+      color: var(--muted);
+      font-weight: 850;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+    .debugDrawer .armButtons { margin-top: 10px; }
+    .debugDrawer button { padding: 10px 12px; font-size: 12px; }
 
     .batteryRing {
       width: 190px;
@@ -444,14 +464,23 @@ DASHBOARD_HTML = r"""<!doctype html>
             <div>
               <div id="mission" class="missionState warn">UNKNOWN</div>
               <div id="missionReason" class="missionReason">startup</div>
-              <div class="armButtons">
-                <button class="enable" onclick="setAutonomy(true)">Request Autonomy</button>
-                <button class="disable" onclick="setAutonomy(false)">Disable</button>
-                <button class="enable" onclick="setMavsdk(true)">Enable MAVSDK</button>
-                <button class="disable" onclick="setMavsdk(false)">Disable MAVSDK</button>
-                <button class="enable" onclick="setMission(true)">Start Mission</button>
-                <button class="disable" onclick="setMission(false)">Stop Mission</button>
+              <div class="armButtons pilotButtons">
+                <button class="enable" onclick="systemReady()">System Ready</button>
+                <button class="enable" onclick="startSmartMission()">Start Mission</button>
+                <button class="hold" onclick="abortHold()">Abort / Hold</button>
+                <button class="disable" onclick="landNow()">Land</button>
               </div>
+              <details class="debugDrawer">
+                <summary>Debug drawer · raw gate controls</summary>
+                <div class="armButtons">
+                  <button class="enable" onclick="setAutonomy(true)">Autonomy Request ON</button>
+                  <button class="disable" onclick="setAutonomy(false)">Autonomy Request OFF</button>
+                  <button class="enable" onclick="setMavsdk(true)">MAVSDK Offboard Request ON</button>
+                  <button class="disable" onclick="setMavsdk(false)">MAVSDK Offboard Request OFF</button>
+                  <button class="enable" onclick="setMission(true)">Mission Request ON</button>
+                  <button class="disable" onclick="setMission(false)">Mission Request OFF</button>
+                </div>
+              </details>
             </div>
             <div class="batteryRing"><div class="batteryRingText"><div id="batteryBig" class="big">0%</div><div id="batteryVolt" class="small">0.00 V</div></div></div>
           </div>
@@ -727,14 +756,21 @@ DASHBOARD_HTML = r"""<!doctype html>
       badge.innerHTML = '<span class="dot"></span>' + (visible ? 'LOCKED' : 'SEARCHING');
     }
 
-    async function postBool(path, enabled) {
-      await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled }) });
+    async function postJson(path, payload) {
+      await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload || {}) });
       await refresh();
     }
+
+    async function postBool(path, enabled) { await postJson(path, { enabled }); }
 
     async function setAutonomy(enabled) { await postBool('/api/autonomy_request', enabled); }
     async function setMavsdk(enabled) { await postBool('/api/mavsdk_request', enabled); }
     async function setMission(enabled) { await postBool('/api/mission_request', enabled); }
+
+    async function systemReady() { await setAutonomy(true); }
+    async function startSmartMission() { await setMission(true); }
+    async function abortHold() { await postJson('/api/abort_hold', { enabled: true }); }
+    async function landNow() { await postJson('/api/land', { enabled: true }); }
 
     async function refresh() {
       if (document.hidden) return;
@@ -849,6 +885,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "/api/autonomy_request": "request_autonomy_fn",
             "/api/mavsdk_request": "request_mavsdk_fn",
             "/api/mission_request": "request_mission_fn",
+            "/api/abort_hold": "request_abort_hold_fn",
+            "/api/land": "request_land_fn",
         }.get(self.path)
         if request_attr is None:
             self._send(404, b"not found", "text/plain")
@@ -891,6 +929,7 @@ class DashboardNode(Node):
         self.declare_parameter("autonomy_state_topic", "/drone/autonomy/state")
         self.declare_parameter("mission_state_topic", "/drone/mission/state")
         self.declare_parameter("mavsdk_command_status_topic", "/drone/mavsdk/command_status")
+        self.declare_parameter("mavsdk_action_topic", "/drone/mavsdk/action_command")
 
         self.host = str(self.get_parameter("host").value)
         self.port = int(self.get_parameter("port").value)
@@ -907,12 +946,15 @@ class DashboardNode(Node):
         self.autonomy_state_topic = str(self.get_parameter("autonomy_state_topic").value)
         self.mission_state_topic = str(self.get_parameter("mission_state_topic").value)
         self.mavsdk_command_status_topic = str(self.get_parameter("mavsdk_command_status_topic").value)
+        self.mavsdk_action_topic = str(self.get_parameter("mavsdk_action_topic").value)
 
         self._lock = threading.Lock()
         self._started_at = time.time()
         self._last_autonomy_request: bool | None = None
         self._last_mavsdk_request: bool | None = None
         self._last_mission_request: bool | None = None
+        self._last_action_request: str | None = None
+        self._action_command_id: int = 0
         self._snapshot: dict[str, Any] = self._empty_snapshot()
 
         qos = QoSProfile(
@@ -924,6 +966,7 @@ class DashboardNode(Node):
         self.autonomy_request_pub = self.create_publisher(Bool, self.autonomy_request_topic, qos)
         self.mavsdk_request_pub = self.create_publisher(Bool, self.mavsdk_request_topic, qos)
         self.mission_request_pub = self.create_publisher(Bool, self.mission_request_topic, qos)
+        self.action_pub = self.create_publisher(MavsdkActionCommand, self.mavsdk_action_topic, qos)
         self.create_subscription(DetectionArray, self.detections_topic, self._detections_cb, qos)
         self.create_subscription(TargetError, self.target_error_topic, self._target_cb, qos)
         self.create_subscription(DroneTelemetry, self.telemetry_topic, self._telemetry_cb, qos)
@@ -946,19 +989,23 @@ class DashboardNode(Node):
         self.diagnostics.add_output(self.autonomy_request_topic, "autonomy_request")
         self.diagnostics.add_output(self.mavsdk_request_topic, "mavsdk_request")
         self.diagnostics.add_output(self.mission_request_topic, "mission_request")
+        self.diagnostics.add_output(self.mavsdk_action_topic, "mavsdk_action_command")
 
         self._server = ThreadingHTTPServer((self.host, self.port), DashboardHandler)
         self._server.snapshot_fn = self.get_snapshot  # type: ignore[attr-defined]
         self._server.request_autonomy_fn = self.publish_autonomy_request  # type: ignore[attr-defined]
         self._server.request_mavsdk_fn = self.publish_mavsdk_request  # type: ignore[attr-defined]
         self._server.request_mission_fn = self.publish_mission_request  # type: ignore[attr-defined]
+        self._server.request_abort_hold_fn = self.publish_abort_hold  # type: ignore[attr-defined]
+        self._server.request_land_fn = self.publish_land  # type: ignore[attr-defined]
         self._server_thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._server_thread.start()
 
         self.get_logger().warning(
             f"Dashboard available at http://{self.host}:{self.port}/ | "
             f"mission_state={self.mission_state_topic}, autonomy_request={self.autonomy_request_topic}, "
-            f"mavsdk_request={self.mavsdk_request_topic}, mission_request={self.mission_request_topic}"
+            f"mavsdk_request={self.mavsdk_request_topic}, mission_request={self.mission_request_topic}, "
+            f"mavsdk_action={self.mavsdk_action_topic}"
         )
 
     def _empty_snapshot(self) -> dict[str, Any]:
@@ -973,6 +1020,7 @@ class DashboardNode(Node):
             "last_autonomy_request": None,
             "last_mavsdk_request": None,
             "last_mission_request": None,
+            "last_action_request": None,
             "mavsdk_status": "UNKNOWN",
             "detections": {"count": 0, "age_s": None},
             "target": {
@@ -995,6 +1043,7 @@ class DashboardNode(Node):
                 "connected": False,
                 "armed": False,
                 "flight_mode": "UNKNOWN",
+                "landed_state": "UNKNOWN",
                 "battery_percent": 0.0,
                 "battery_voltage": 0.0,
                 "relative_altitude_m": 0.0,
@@ -1081,6 +1130,7 @@ class DashboardNode(Node):
                 "connected": bool(msg.connected),
                 "armed": bool(msg.armed),
                 "flight_mode": msg.flight_mode,
+                "landed_state": msg.landed_state,
                 "battery_percent": round(float(msg.battery_remaining_percent), 1),
                 "battery_voltage": round(float(msg.battery_voltage), 2),
                 "relative_altitude_m": round(float(msg.relative_altitude), 2),
@@ -1186,6 +1236,44 @@ class DashboardNode(Node):
             self._snapshot["_timestamps"]["last_mission_request"] = time.time()
         self.diagnostics.mark_published(self.mission_request_topic, summary=f"requested={enabled}")
         self.get_logger().warning(f"Dashboard mission request: {enabled}")
+
+    def _publish_action_request(self, action: str, note: str) -> None:
+        self._action_command_id += 1
+        msg = MavsdkActionCommand()
+        msg.stamp = self.get_clock().now().to_msg()
+        msg.command_id = int(self._action_command_id)
+        msg.action = action
+        msg.execute = True
+        msg.takeoff_altitude_m = 0.0
+        msg.radius_m = 0.0
+        msg.velocity_m_s = 0.0
+        msg.orbit_revolutions = 0.0
+        msg.yaw_behavior = ""
+        msg.latitude_deg = 0.0
+        msg.longitude_deg = 0.0
+        msg.absolute_altitude_m = 0.0
+        msg.note = note
+        self.action_pub.publish(msg)
+        with self._lock:
+            self._last_action_request = action
+            self._snapshot["last_action_request"] = action
+            self._snapshot["_timestamps"]["last_action_request"] = time.time()
+        self.diagnostics.mark_published(self.mavsdk_action_topic, summary=f"id={msg.command_id}, action={action}, note={note}")
+        self.get_logger().warning(f"Dashboard MAVSDK action request: {action} | {note}")
+
+    def publish_abort_hold(self, enabled: bool = True) -> None:
+        # Abort should stop our mission/offboard requests first, then ask PX4 to hold if actions are enabled.
+        self.publish_mission_request(False)
+        self.publish_mavsdk_request(False)
+        self.publish_autonomy_request(False)
+        self._publish_action_request("HOLD", "dashboard Abort/Hold")
+
+    def publish_land(self, enabled: bool = True) -> None:
+        # Land is intentionally separate from Abort/Hold. telemetry_node still enforces allow_mavsdk_actions.
+        self.publish_mission_request(False)
+        self.publish_mavsdk_request(False)
+        self.publish_autonomy_request(False)
+        self._publish_action_request("LAND", "dashboard Land")
 
     def destroy_node(self) -> None:
         if hasattr(self, "_server"):
