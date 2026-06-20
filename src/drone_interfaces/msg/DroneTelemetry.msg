@@ -9,13 +9,19 @@ string connection_status
 float32 battery_voltage
 float32 battery_remaining_percent
 
-# GPS
+# GPS/global position
 float64 latitude
 float64 longitude
 float32 absolute_altitude
 float32 relative_altitude
 int32 gps_num_satellites
 int32 gps_fix_type
+
+# Local position (PX4 NED frame, meters). Valid when local_position_valid is true.
+bool local_position_valid
+float32 local_position_north
+float32 local_position_east
+float32 local_position_down
 
 # Attitude (radians)
 float32 roll

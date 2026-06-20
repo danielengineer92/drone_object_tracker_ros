@@ -4,11 +4,20 @@ builtin_interfaces/Time stamp
 # Command type
 string command_type  # VELOCITY, POSITION, IDLE
 
-# Velocity commands (m/s, body frame)
+# Velocity commands (m/s, body frame) and yaw-rate command (rad/s)
+# Used for legacy/debug velocity mode and as diagnostics for POSITION mode.
 float32 velocity_forward
 float32 velocity_right
 float32 velocity_down
 float32 yaw_rate
+
+# Position commands (local NED frame; meters, yaw in degrees)
+# position_valid must be true when command_type == POSITION.
+bool position_valid
+float32 position_north
+float32 position_east
+float32 position_down
+float32 yaw_deg
 
 # Whether the control node approved this command for the MAVSDK bridge
 bool executed

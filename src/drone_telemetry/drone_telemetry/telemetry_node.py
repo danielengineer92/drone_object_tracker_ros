@@ -3,15 +3,15 @@ PX4 MAVSDK bridge node for the drone vision system.
 
 This node owns the single MAVSDK connection to the Pixhawk. It publishes
 telemetry and, when explicitly enabled, consumes /drone/control/command and sends
-safe yaw-only Offboard velocity setpoints to PX4.
+safe position-hold/yaw Offboard setpoints to PX4.
 
 Safety posture for this first command bridge:
 - Does NOT arm the drone.
 - Does NOT take off.
 - Does NOT command forward/right/down motion by default.
 - Requires /drone/mavsdk/offboard_enable true before starting Offboard.
-- Sends zero body velocity/yawspeed unless the latest ControlCommand is fresh,
-  command_type == VELOCITY, executed == true, and execution_status == SENT.
+- Sends local-NED PositionNedYaw hold setpoints when priming or tracking.
+- Legacy VELOCITY commands are still understood, but the smart mission now uses POSITION.
 """
 
 from __future__ import annotations
@@ -33,6 +33,8 @@ from drone_diagnostics.node_diagnostics import NodeDiagnostics
 
 
 CMD_VELOCITY = "VELOCITY"
+CMD_POSITION = "POSITION"
+CMD_IDLE = "IDLE"
 STATUS_SENT = "SENT"
 
 BRIDGE_DISABLED = "MAVSDK_OFFBOARD_DISABLED"
@@ -40,13 +42,15 @@ BRIDGE_NO_COMMAND = "NO_CONTROL_COMMAND"
 BRIDGE_COMMAND_STALE = "CONTROL_COMMAND_STALE"
 BRIDGE_COMMAND_IDLE = "CONTROL_COMMAND_IDLE"
 BRIDGE_COMMAND_NOT_APPROVED = "CONTROL_COMMAND_NOT_APPROVED"
+BRIDGE_NO_LOCAL_POSITION = "NO_LOCAL_POSITION_NED"
+BRIDGE_BAD_POSITION_COMMAND = "BAD_POSITION_COMMAND"
 BRIDGE_NOT_CONNECTED = "PX4_NOT_CONNECTED"
 BRIDGE_NOT_ARMED = "PX4_NOT_ARMED"
 BRIDGE_LOW_BATTERY = "PX4_LOW_BATTERY"
 BRIDGE_READY = "READY_TO_SEND"
 BRIDGE_SENT = "SENT_TO_PX4"
 BRIDGE_ZERO_SENT = "ZERO_SENT_TO_PX4"
-BRIDGE_PRIMING = "PRIMING_OFFBOARD_ZERO_SETPOINTS"
+BRIDGE_PRIMING = "PRIMING_OFFBOARD_POSITION_HOLD"
 BRIDGE_OFFBOARD_STARTED = "OFFBOARD_STARTED"
 BRIDGE_OFFBOARD_STOPPED = "OFFBOARD_STOPPED"
 BRIDGE_OFFBOARD_START_FAILED = "OFFBOARD_START_FAILED"
@@ -74,7 +78,7 @@ ORBIT_YAW_BEHAVIOR_VALUES = {
 
 
 class TelemetryNode(Node):
-    """ROS 2 node that bridges PX4/MAVSDK telemetry and yaw-only commands."""
+    """ROS 2 node that bridges PX4/MAVSDK telemetry and position-hold yaw commands."""
 
     def __init__(self) -> None:
         super().__init__('telemetry_node')
@@ -142,6 +146,7 @@ class TelemetryNode(Node):
         self._action_command_count: int = 0
         self._last_handled_action_id: int = 0
         self._action_in_progress: bool = False
+        self._prime_hold_position: Optional[tuple[float, float, float, float]] = None
 
         # Telemetry data protected by lock
         self._data_lock = threading.Lock()
@@ -152,6 +157,10 @@ class TelemetryNode(Node):
             'longitude': 0.0,
             'absolute_altitude': 0.0,
             'relative_altitude': 0.0,
+            'local_position_valid': False,
+            'local_position_north': 0.0,
+            'local_position_east': 0.0,
+            'local_position_down': 0.0,
             'gps_num_satellites': 0,
             'gps_fix_type': 0,
             'roll': 0.0,
@@ -243,7 +252,7 @@ class TelemetryNode(Node):
             f'command_rate={self._command_rate:.1f}Hz, '
             f'mavsdk_offboard_enabled={self._mavsdk_offboard_enabled}, '
             f'allow_mavsdk_actions={self._allow_mavsdk_actions}, '
-            f'mode=YAW_ONLY, max_yaw={self._max_yaw_rate_rad_s:.2f}rad/s, '
+            f'mode=POSITION_HOLD_YAW, max_yaw={self._max_yaw_rate_rad_s:.2f}rad/s, '
             'actions=blocked_by_default_until_allow_mavsdk_actions_true'
         )
         if not self._mavsdk_offboard_enabled:
@@ -276,7 +285,7 @@ class TelemetryNode(Node):
             self._control_command_topic,
             summary=(
                 f'messages={self._control_command_count}, type={msg.command_type}, '
-                f'executed={msg.executed}, status={msg.execution_status}, yaw={msg.yaw_rate:+.3f}'
+                f'executed={msg.executed}, status={msg.execution_status}, yaw_rate={msg.yaw_rate:+.3f}, pos_valid={getattr(msg, 'position_valid', False)}'
             ),
         )
 
@@ -287,9 +296,11 @@ class TelemetryNode(Node):
         self._offboard_enable_count += 1
 
         if enabled and not old_enabled:
+            self._prime_hold_position = None
             self.get_logger().warning('*** MAVSDK OFFBOARD EXECUTOR ENABLED by /drone/mavsdk/offboard_enable ***')
         elif not enabled and old_enabled:
-            self.get_logger().warning('MAVSDK offboard executor disabled; sending/stopping zero setpoints.')
+            self._prime_hold_position = None
+            self.get_logger().warning('MAVSDK offboard executor disabled; sending/stopping zero/hold setpoints.')
 
         self._diagnostics.mark_received(
             self._offboard_enable_topic,
@@ -381,6 +392,7 @@ class TelemetryNode(Node):
         await asyncio.gather(
             self._stream_battery(drone),
             self._stream_position(drone),
+            self._stream_position_velocity_ned(drone),
             self._stream_attitude(drone),
             self._stream_velocity(drone),
             self._stream_armed(drone),
@@ -409,6 +421,29 @@ class TelemetryNode(Node):
                 self._telemetry_data['longitude'] = position.longitude_deg
                 self._telemetry_data['absolute_altitude'] = position.absolute_altitude_m
                 self._telemetry_data['relative_altitude'] = position.relative_altitude_m
+
+    async def _stream_position_velocity_ned(self, drone) -> None:
+        try:
+            async for pv in drone.telemetry.position_velocity_ned():
+                if not self._running:
+                    return
+                with self._data_lock:
+                    self._telemetry_data['local_position_valid'] = True
+                    self._telemetry_data['local_position_north'] = float(pv.position.north_m)
+                    self._telemetry_data['local_position_east'] = float(pv.position.east_m)
+                    self._telemetry_data['local_position_down'] = float(pv.position.down_m)
+                    self._telemetry_data['velocity_north'] = float(pv.velocity.north_m_s)
+                    self._telemetry_data['velocity_east'] = float(pv.velocity.east_m_s)
+                    self._telemetry_data['velocity_down'] = float(pv.velocity.down_m_s)
+        except Exception as exc:
+            with self._data_lock:
+                self._telemetry_data['local_position_valid'] = False
+            self._log_throttled(
+                'position_velocity_ned_failed',
+                'warning',
+                f'position_velocity_ned stream failed/unavailable: {exc}',
+                5.0,
+            )
 
     async def _stream_attitude(self, drone) -> None:
         async for attitude in drone.telemetry.attitude_euler():
@@ -665,13 +700,13 @@ class TelemetryNode(Node):
 
     async def _offboard_command_loop(self, drone) -> None:
         try:
-            from mavsdk.offboard import OffboardError, VelocityBodyYawspeed
+            from mavsdk.offboard import OffboardError, PositionNedYaw, VelocityBodyYawspeed
         except ImportError:
             self.get_logger().error('MAVSDK offboard plugin import failed. Check MAVSDK-Python install.')
             return
 
         period = 1.0 / self._command_rate
-        zero_setpoint = VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0)
+        zero_velocity_setpoint = VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0)
 
         while self._running:
             if self._action_in_progress:
@@ -692,15 +727,23 @@ class TelemetryNode(Node):
 
             if not decision['valid']:
                 if decision.get('prime_ok', False):
+                    prime_setpoint = self._get_or_capture_prime_position_setpoint(PositionNedYaw)
+                    if prime_setpoint is None:
+                        if self._offboard_active:
+                            await self._stop_offboard(drone)
+                        self._publish_command_status(f'{BRIDGE_NO_LOCAL_POSITION}: waiting for position_velocity_ned')
+                        await asyncio.sleep(period)
+                        continue
+
                     if not self._offboard_active:
                         try:
-                            # PX4 Offboard wants a setpoint stream before/while switching modes.
-                            # Start it with zero body velocity so the mission can prime Offboard
-                            # before the target lock produces real yaw commands.
-                            await drone.offboard.set_velocity_body(zero_setpoint)
+                            # PX4/MAVSDK requires a setpoint before starting Offboard.
+                            # Prime with a captured local NED hold position so there is
+                            # no body-frame velocity drift during the button/state race.
+                            await drone.offboard.set_position_ned(prime_setpoint)
                             await drone.offboard.start()
                             self._offboard_active = True
-                            self.get_logger().warning('*** PX4 OFFBOARD PRIMED with zero setpoints ***')
+                            self.get_logger().warning('*** PX4 OFFBOARD PRIMED with local POSITION hold setpoint ***')
                             self._publish_command_status(BRIDGE_PRIMING, force=True)
                         except OffboardError as exc:
                             result = getattr(getattr(exc, '_result', None), 'result', exc)
@@ -713,18 +756,62 @@ class TelemetryNode(Node):
                             )
                             await asyncio.sleep(period)
                             continue
-                    await self._send_velocity_body(
+                    await self._send_position_ned(
                         drone,
-                        zero_setpoint,
-                        f'{BRIDGE_ZERO_SENT}: {decision["reason"]}',
-                        is_zero=True,
+                        prime_setpoint,
+                        f'{BRIDGE_SENT}: position_hold_prime {decision["reason"]}',
+                        is_hold=True,
                     )
                 else:
                     if self._offboard_active:
-                        await self._send_velocity_body(drone, zero_setpoint, BRIDGE_ZERO_SENT, is_zero=True)
+                        hold_setpoint = self._get_or_capture_prime_position_setpoint(PositionNedYaw)
+                        if hold_setpoint is not None:
+                            await self._send_position_ned(drone, hold_setpoint, BRIDGE_ZERO_SENT, is_hold=True)
+                        else:
+                            await self._send_velocity_body(drone, zero_velocity_setpoint, BRIDGE_ZERO_SENT, is_zero=True)
                     else:
                         self._publish_command_status(str(decision['reason']))
                         self._log_throttled('offboard_blocked', 'info', f'Offboard blocked: {decision["reason"]}', 2.0)
+                await asyncio.sleep(period)
+                continue
+
+            if decision['command_type'] == CMD_POSITION:
+                position_setpoint = PositionNedYaw(
+                    float(decision['position_north_m']),
+                    float(decision['position_east_m']),
+                    float(decision['position_down_m']),
+                    float(decision['yaw_deg']),
+                )
+
+                if not self._offboard_active:
+                    try:
+                        await drone.offboard.set_position_ned(position_setpoint)
+                        await drone.offboard.start()
+                        self._offboard_active = True
+                        self.get_logger().warning('*** PX4 OFFBOARD STARTED in POSITION hold mode ***')
+                        self._publish_command_status(BRIDGE_OFFBOARD_STARTED, force=True)
+                    except OffboardError as exc:
+                        result = getattr(getattr(exc, '_result', None), 'result', exc)
+                        self._publish_command_status(f'{BRIDGE_OFFBOARD_START_FAILED}: {result}', force=True)
+                        self._log_throttled(
+                            'offboard_start_failed',
+                            'warning',
+                            f'Offboard start failed: {result}. Drone must already be safely armed/ready; this node will not arm or take off.',
+                            2.0,
+                        )
+                        await asyncio.sleep(period)
+                        continue
+
+                await self._send_position_ned(
+                    drone,
+                    position_setpoint,
+                    (
+                        f'{BRIDGE_SENT}: posNED=({decision["position_north_m"]:+.2f},'
+                        f'{decision["position_east_m"]:+.2f},{decision["position_down_m"]:+.2f})m, '
+                        f'yaw={decision["yaw_deg"]:.1f}deg, yaw_rate={decision["yaw_rate_rad_s"]:+.3f}rad/s'
+                    ),
+                    is_hold=False,
+                )
                 await asyncio.sleep(period)
                 continue
 
@@ -737,11 +824,10 @@ class TelemetryNode(Node):
 
             if not self._offboard_active:
                 try:
-                    # PX4 requires a valid setpoint before switching into Offboard.
-                    await drone.offboard.set_velocity_body(zero_setpoint)
+                    await drone.offboard.set_velocity_body(zero_velocity_setpoint)
                     await drone.offboard.start()
                     self._offboard_active = True
-                    self.get_logger().warning('*** PX4 OFFBOARD STARTED by MAVSDK command bridge ***')
+                    self.get_logger().warning('*** PX4 OFFBOARD STARTED by legacy VELOCITY command bridge ***')
                     self._publish_command_status(BRIDGE_OFFBOARD_STARTED, force=True)
                 except OffboardError as exc:
                     result = getattr(getattr(exc, '_result', None), 'result', exc)
@@ -763,6 +849,42 @@ class TelemetryNode(Node):
             )
             await asyncio.sleep(period)
 
+    def _get_or_capture_prime_position_setpoint(self, position_cls):
+        if self._prime_hold_position is None:
+            with self._data_lock:
+                valid = bool(self._telemetry_data['local_position_valid'])
+                north = float(self._telemetry_data['local_position_north'])
+                east = float(self._telemetry_data['local_position_east'])
+                down = float(self._telemetry_data['local_position_down'])
+                yaw_deg = math.degrees(float(self._telemetry_data['yaw'])) % 360.0
+
+            if not valid or not all(math.isfinite(v) for v in (north, east, down, yaw_deg)):
+                return None
+
+            self._prime_hold_position = (north, east, down, yaw_deg)
+            self.get_logger().warning(
+                'Captured bridge prime POSITION hold | '
+                f'N={north:.2f}m, E={east:.2f}m, D={down:.2f}m, yaw={yaw_deg:.1f}deg'
+            )
+
+        north, east, down, yaw_deg = self._prime_hold_position
+        return position_cls(float(north), float(east), float(down), float(yaw_deg))
+
+    async def _send_position_ned(self, drone, position_setpoint, status: str, is_hold: bool) -> None:
+        try:
+            await drone.offboard.set_position_ned(position_setpoint)
+            self._px4_send_count += 1
+            if is_hold:
+                self._px4_zero_count += 1
+            self._last_bridge_status = status
+            self._publish_command_status(status)
+            if not is_hold:
+                self._log_throttled('position_sent', 'info', f'MAVSDK position command sent | {status}', 0.5)
+        except Exception as exc:
+            self._publish_command_status(f'{BRIDGE_SEND_FAILED}: {str(exc)[:80]}', force=True)
+            self._log_throttled('send_failed', 'warning', f'Offboard position setpoint send failed: {exc}', 1.0)
+            self._offboard_active = False
+
     async def _send_velocity_body(self, drone, velocity_setpoint, status: str, is_zero: bool) -> None:
         try:
             await drone.offboard.set_velocity_body(velocity_setpoint)
@@ -782,6 +904,7 @@ class TelemetryNode(Node):
         try:
             await drone.offboard.stop()
             self._offboard_active = False
+            self._prime_hold_position = None
             self.get_logger().warning('PX4 Offboard stopped by MAVSDK command bridge.')
             self._publish_command_status(BRIDGE_OFFBOARD_STOPPED, force=True)
         except Exception as exc:
@@ -806,11 +929,16 @@ class TelemetryNode(Node):
             'valid': False,
             'prime_ok': False,
             'reason': BRIDGE_DISABLED,
+            'command_type': CMD_IDLE,
             'forward_m_s': 0.0,
             'right_m_s': 0.0,
             'down_m_s': 0.0,
             'yaw_rate_rad_s': 0.0,
             'yawspeed_deg_s': 0.0,
+            'position_north_m': 0.0,
+            'position_east_m': 0.0,
+            'position_down_m': 0.0,
+            'yaw_deg': 0.0,
             'flight_mode': flight_mode,
         }
 
@@ -829,9 +957,8 @@ class TelemetryNode(Node):
             decision['reason'] = f'{BRIDGE_LOW_BATTERY}: {battery_remaining:.1f}%'
             return decision
 
-        # Once the executor gate is true and PX4 is safe, allow zero-setpoint
-        # Offboard priming even before the control node has a real yaw command.
-        # This removes the dashboard button-race and keeps PX4 fed with valid setpoints.
+        # Once the executor gate is true and PX4 is safe, allow position-hold
+        # Offboard priming before target lock produces yaw commands.
         decision['prime_ok'] = True
 
         if command is None:
@@ -841,10 +968,6 @@ class TelemetryNode(Node):
         command_age = now - command_time
         if command_age > self._command_timeout:
             decision['reason'] = f'{BRIDGE_COMMAND_STALE} ({command_age:.2f}s)'
-            return decision
-
-        if command.command_type != CMD_VELOCITY:
-            decision['reason'] = f'{BRIDGE_COMMAND_IDLE}: type={command.command_type}, status={command.execution_status}'
             return decision
 
         if not command.executed or command.execution_status != STATUS_SENT:
@@ -860,11 +983,42 @@ class TelemetryNode(Node):
             self._max_yaw_rate_rad_s,
         )
 
+        if command.command_type == CMD_POSITION:
+            north = float(getattr(command, 'position_north', 0.0))
+            east = float(getattr(command, 'position_east', 0.0))
+            down = float(getattr(command, 'position_down', 0.0))
+            yaw_deg = float(getattr(command, 'yaw_deg', 0.0)) % 360.0
+            if not bool(getattr(command, 'position_valid', False)):
+                decision['reason'] = f'{BRIDGE_BAD_POSITION_COMMAND}: position_valid=false'
+                return decision
+            if not all(math.isfinite(v) for v in (north, east, down, yaw_deg)):
+                decision['reason'] = f'{BRIDGE_BAD_POSITION_COMMAND}: non_finite'
+                return decision
+
+            decision.update(
+                {
+                    'valid': True,
+                    'reason': BRIDGE_READY,
+                    'command_type': CMD_POSITION,
+                    'position_north_m': north,
+                    'position_east_m': east,
+                    'position_down_m': down,
+                    'yaw_deg': yaw_deg,
+                    'yaw_rate_rad_s': yaw_rate_rad_s,
+                    'yawspeed_deg_s': math.degrees(yaw_rate_rad_s),
+                }
+            )
+            return decision
+
+        if command.command_type != CMD_VELOCITY:
+            decision['reason'] = f'{BRIDGE_COMMAND_IDLE}: type={command.command_type}, status={command.execution_status}'
+            return decision
+
         forward_m_s = 0.0
         right_m_s = 0.0
         down_m_s = 0.0
         if self._allow_translation_commands:
-            # Disabled by default. Keep yaw-only for early testing.
+            # Disabled by default. Stage 1 uses POSITION hold instead of VELOCITY translation.
             forward_m_s = float(command.velocity_forward)
             right_m_s = float(command.velocity_right)
             down_m_s = float(command.velocity_down)
@@ -873,6 +1027,7 @@ class TelemetryNode(Node):
             {
                 'valid': True,
                 'reason': BRIDGE_READY,
+                'command_type': CMD_VELOCITY,
                 'forward_m_s': forward_m_s,
                 'right_m_s': right_m_s,
                 'down_m_s': down_m_s,
@@ -932,6 +1087,10 @@ class TelemetryNode(Node):
             msg.longitude = float(self._telemetry_data['longitude'])
             msg.absolute_altitude = float(self._telemetry_data['absolute_altitude'])
             msg.relative_altitude = float(self._telemetry_data['relative_altitude'])
+            msg.local_position_valid = bool(self._telemetry_data['local_position_valid'])
+            msg.local_position_north = float(self._telemetry_data['local_position_north'])
+            msg.local_position_east = float(self._telemetry_data['local_position_east'])
+            msg.local_position_down = float(self._telemetry_data['local_position_down'])
             msg.gps_num_satellites = int(self._telemetry_data['gps_num_satellites'])
             msg.gps_fix_type = int(self._telemetry_data['gps_fix_type'])
             msg.roll = float(self._telemetry_data['roll'])
@@ -964,6 +1123,7 @@ class TelemetryNode(Node):
             armed = self._telemetry_data['armed']
             flight_mode = self._telemetry_data['flight_mode']
             battery = self._telemetry_data['battery_remaining']
+            local_valid = self._telemetry_data['local_position_valid']
 
         with self._command_lock:
             command_age = None if self._latest_command is None else time.monotonic() - self._latest_command_time
@@ -975,7 +1135,7 @@ class TelemetryNode(Node):
         self.get_logger().info(
             'MAVSDK bridge status | '
             f'telemetry_published={self._telemetry_publish_count}, connected={self._connected}, '
-            f'status={self._connection_status}, armed={armed}, mode={flight_mode}, battery={battery:.1f}%, '
+            f'status={self._connection_status}, armed={armed}, mode={flight_mode}, battery={battery:.1f}%, local_ned={local_valid}, '
             f'offboard_enabled={self._mavsdk_offboard_enabled}, offboard_active={self._offboard_active}, '
             f'control_msgs={self._control_command_count}, command_age={age_text}, '
             f'latest_type={latest_type}, latest_status={latest_status}, latest_yaw={latest_yaw:+.3f}, '

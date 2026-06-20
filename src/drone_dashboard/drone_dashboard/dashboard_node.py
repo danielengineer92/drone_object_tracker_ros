@@ -1135,6 +1135,10 @@ class DashboardNode(Node):
                 "battery_voltage": round(float(msg.battery_voltage), 2),
                 "relative_altitude_m": round(float(msg.relative_altitude), 2),
                 "absolute_altitude_m": round(float(msg.absolute_altitude), 2),
+                "local_position_valid": bool(getattr(msg, "local_position_valid", False)),
+                "local_position_north_m": round(float(getattr(msg, "local_position_north", 0.0)), 2),
+                "local_position_east_m": round(float(getattr(msg, "local_position_east", 0.0)), 2),
+                "local_position_down_m": round(float(getattr(msg, "local_position_down", 0.0)), 2),
                 "roll_rad": round(float(msg.roll), 4),
                 "pitch_rad": round(float(msg.pitch), 4),
                 "yaw_rad": round(float(msg.yaw), 4),
@@ -1163,6 +1167,11 @@ class DashboardNode(Node):
                 "right_m_s": round(float(msg.velocity_right), 3),
                 "down_m_s": round(float(msg.velocity_down), 3),
                 "yaw_rate_rad_s": round(float(msg.yaw_rate), 3),
+                "position_valid": bool(getattr(msg, "position_valid", False)),
+                "position_north_m": round(float(getattr(msg, "position_north", 0.0)), 2),
+                "position_east_m": round(float(getattr(msg, "position_east", 0.0)), 2),
+                "position_down_m": round(float(getattr(msg, "position_down", 0.0)), 2),
+                "yaw_deg": round(float(getattr(msg, "yaw_deg", 0.0)), 1),
             },
         )
         self.diagnostics.mark_received(self.control_command_topic, summary=f"status={msg.execution_status}, executed={msg.executed}")

@@ -151,6 +151,12 @@ class FakeTelemetryNode(Node):
         msg.pitch = float(self._pitch)
         msg.yaw = float(self._yaw)
 
+        # Local NED position simulation. In PX4 NED, up is negative down.
+        msg.local_position_valid = True
+        msg.local_position_north = 0.0
+        msg.local_position_east = 0.0
+        msg.local_position_down = float(-self._current_altitude)
+
         # Velocity simulation
         if self._simulate_flying:
             msg.velocity_north = float(random.gauss(0, 0.1))

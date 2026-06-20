@@ -13,11 +13,13 @@ Publishes:
 This node is intentionally conservative for early flight testing:
 - target tracking is gated by /drone/autonomy/enabled
 - horizontal image error drives yaw in TRACK_CENTER
-- mission commands can request FLY_FORWARD, APPROACH_TARGET, or ORBIT_TARGET
-- translation is still blocked downstream unless the MAVSDK bridge explicitly allows it
+- the takeoff/local NED position is captured and held during yaw
+- mission commands can request FLY_FORWARD, APPROACH_TARGET, or ORBIT_TARGET later
+- current safe stage publishes POSITION setpoints only for hold+yaw
 - commands are zeroed unless all safety gates pass
 """
 
+import math
 import time
 from typing import Optional
 
@@ -33,6 +35,7 @@ from drone_diagnostics.node_diagnostics import NodeDiagnostics
 
 CMD_IDLE = "IDLE"
 CMD_VELOCITY = "VELOCITY"
+CMD_POSITION = "POSITION"
 
 STATUS_SENT = "SENT"
 STATUS_NO_TARGET = "NO_TARGET_DATA"
@@ -47,6 +50,7 @@ STATUS_BLOCKED_DISARMED = "BLOCKED_NOT_ARMED"
 STATUS_BLOCKED_DISCONNECTED = "BLOCKED_NOT_CONNECTED"
 STATUS_ALTITUDE_CLAMPED = "ALTITUDE_FLOOR_CLAMPED"
 STATUS_MISSION_STALE = "MISSION_COMMAND_STALE"
+STATUS_BLOCKED_NO_LOCAL_POSITION = "BLOCKED_NO_LOCAL_POSITION"
 
 DYNAMIC_PARAMS = {
     "autonomy_enabled", "autonomous_enabled",
@@ -163,6 +167,15 @@ class ControlNode(Node):
         self.last_command_down = 0.0
         self.last_command_yaw = 0.0
 
+        # POSITION mode: capture the local NED position when autonomy starts,
+        # then hold that coordinate while the yaw setpoint changes.
+        self.position_hold_valid = False
+        self.hold_position_north = 0.0
+        self.hold_position_east = 0.0
+        self.hold_position_down = 0.0
+        self.position_yaw_target_rad = 0.0
+        self.last_yaw_update_time = 0.0
+
         self.command_count = 0
         self.idle_command_count = 0
         self.executed_command_count = 0
@@ -235,7 +248,7 @@ class ControlNode(Node):
             f"autonomy_enable_topic={self.autonomy_enable_topic}, "
             f"mission_command_topic={self.mission_command_topic}, "
             f"autonomy_enabled={self.autonomy_enabled}, "
-            "mode=MISSION_AWARE, default=TRACK_CENTER/yaw-only"
+            "mode=MISSION_AWARE, default=TRACK_CENTER/position-hold-yaw"
         )
 
         if not self.autonomy_enabled:
@@ -327,6 +340,7 @@ class ControlNode(Node):
             self.last_command_right = 0.0
             self.last_command_down = 0.0
             self.last_command_yaw = 0.0
+            self.reset_position_hold_anchor()
 
             # Push a zero command immediately on disable instead of waiting for
             # the next control timer tick. During __init__, command_pub does not
@@ -419,6 +433,71 @@ class ControlNode(Node):
     def clamp(value: float, min_value: float, max_value: float) -> float:
         return max(min_value, min(value, max_value))
 
+    @staticmethod
+    def wrap_pi(angle_rad: float) -> float:
+        return (float(angle_rad) + math.pi) % (2.0 * math.pi) - math.pi
+
+    @staticmethod
+    def finite(*values: float) -> bool:
+        return all(math.isfinite(float(value)) for value in values)
+
+    @staticmethod
+    def yaw_rad_to_deg_0_360(yaw_rad: float) -> float:
+        return math.degrees(float(yaw_rad)) % 360.0
+
+    def reset_position_hold_anchor(self) -> None:
+        self.position_hold_valid = False
+        self.hold_position_north = 0.0
+        self.hold_position_east = 0.0
+        self.hold_position_down = 0.0
+        self.position_yaw_target_rad = 0.0
+        self.last_yaw_update_time = 0.0
+
+    def local_position_ready(self) -> bool:
+        if self.last_telemetry is None:
+            return False
+        return bool(getattr(self.last_telemetry, "local_position_valid", False)) and self.finite(
+            getattr(self.last_telemetry, "local_position_north", float("nan")),
+            getattr(self.last_telemetry, "local_position_east", float("nan")),
+            getattr(self.last_telemetry, "local_position_down", float("nan")),
+            getattr(self.last_telemetry, "yaw", float("nan")),
+        )
+
+    def capture_position_hold_anchor(self, current_time: float) -> bool:
+        if self.position_hold_valid:
+            return True
+        if not self.local_position_ready():
+            return False
+
+        telemetry = self.last_telemetry
+        self.hold_position_north = float(telemetry.local_position_north)
+        self.hold_position_east = float(telemetry.local_position_east)
+        self.hold_position_down = float(telemetry.local_position_down)
+        self.position_yaw_target_rad = self.wrap_pi(float(telemetry.yaw))
+        self.last_yaw_update_time = current_time
+        self.position_hold_valid = True
+
+        self.get_logger().warning(
+            "Captured POSITION hold anchor | "
+            f"N={self.hold_position_north:.2f}m, "
+            f"E={self.hold_position_east:.2f}m, "
+            f"D={self.hold_position_down:.2f}m, "
+            f"yaw={self.yaw_rad_to_deg_0_360(self.position_yaw_target_rad):.1f}deg"
+        )
+        return True
+
+    def update_yaw_target(self, yaw_rate_rad_s: float, current_time: float) -> float:
+        if self.last_yaw_update_time <= 0.0:
+            self.last_yaw_update_time = current_time
+            return self.position_yaw_target_rad
+
+        dt = max(0.0, min(current_time - self.last_yaw_update_time, 0.25))
+        self.last_yaw_update_time = current_time
+        self.position_yaw_target_rad = self.wrap_pi(
+            self.position_yaw_target_rad + float(yaw_rate_rad_s) * dt
+        )
+        return self.position_yaw_target_rad
+
     def check_safety(self, current_time: float) -> tuple[bool, str]:
         if self.last_telemetry is None:
             return False, STATUS_BLOCKED_NO_TELEM
@@ -452,6 +531,11 @@ class ControlNode(Node):
         velocity_right: float = 0.0,
         velocity_down: float = 0.0,
         yaw_rate: float = 0.0,
+        position_valid: bool = False,
+        position_north: float = 0.0,
+        position_east: float = 0.0,
+        position_down: float = 0.0,
+        yaw_deg: float = 0.0,
         source_error_x: float = 0.0,
         source_error_y: float = 0.0,
     ) -> ControlCommand:
@@ -463,6 +547,12 @@ class ControlNode(Node):
         command.velocity_right = float(velocity_right)
         command.velocity_down = float(velocity_down)
         command.yaw_rate = float(yaw_rate)
+
+        command.position_valid = bool(position_valid)
+        command.position_north = float(position_north)
+        command.position_east = float(position_east)
+        command.position_down = float(position_down)
+        command.yaw_deg = float(yaw_deg)
 
         command.executed = bool(executed)
         command.execution_status = status
@@ -505,6 +595,59 @@ class ControlNode(Node):
         yaw = self.rate_limit_value(yaw, self.last_command_yaw, self.max_yaw_accel * self.control_period)
         return forward, right, down, yaw
 
+    def publish_position_hold(
+        self,
+        status: str,
+        yaw_rate: float = 0.0,
+        source_error_x: float = 0.0,
+        source_error_y: float = 0.0,
+        update_yaw: bool = False,
+    ) -> None:
+        current_time = time.time()
+        if update_yaw:
+            yaw_rad = self.update_yaw_target(yaw_rate, current_time)
+        else:
+            yaw_rad = self.position_yaw_target_rad
+            self.last_yaw_update_time = current_time
+
+        yaw_deg = self.yaw_rad_to_deg_0_360(yaw_rad)
+
+        command = self.make_command(
+            CMD_POSITION,
+            status,
+            executed=True,
+            velocity_forward=0.0,
+            velocity_right=0.0,
+            velocity_down=0.0,
+            yaw_rate=float(yaw_rate),
+            position_valid=True,
+            position_north=self.hold_position_north,
+            position_east=self.hold_position_east,
+            position_down=self.hold_position_down,
+            yaw_deg=yaw_deg,
+            source_error_x=source_error_x,
+            source_error_y=source_error_y,
+        )
+
+        self.last_command_forward = 0.0
+        self.last_command_right = 0.0
+        self.last_command_down = 0.0
+        self.last_command_yaw = float(yaw_rate)
+
+        self.command_pub.publish(command)
+        self.command_count += 1
+        self.executed_command_count += 1
+
+        self.diagnostics.mark_published(
+            self.control_command_topic,
+            summary=(
+                f"commands={self.command_count}, executed={self.executed_command_count}, "
+                f"type={CMD_POSITION}, N={self.hold_position_north:.2f}, "
+                f"E={self.hold_position_east:.2f}, D={self.hold_position_down:.2f}, "
+                f"yaw_deg={yaw_deg:.1f}, yaw_rate={yaw_rate:.3f}, status={status}"
+            ),
+        )
+
     def publish_idle(
         self,
         status: str,
@@ -537,6 +680,11 @@ class ControlNode(Node):
         command.velocity_right = 0.0
         command.velocity_down = 0.0
         command.yaw_rate = 0.0
+        command.position_valid = False
+        command.position_north = 0.0
+        command.position_east = 0.0
+        command.position_down = 0.0
+        command.yaw_deg = 0.0
 
         self.command_pub.publish(command)
         self.command_count += 1
@@ -570,47 +718,28 @@ class ControlNode(Node):
             )
             return
 
-        # Scripted non-vision mode for mission step 2. Still gated by telemetry/arming.
-        if mission_mode == "FLY_FORWARD" and mission is not None:
-            safe, reason = self.check_safety(current_time)
-            forward, right, down, yaw = self.limit_motion(
-                float(mission.velocity_forward),
-                float(mission.velocity_right),
-                float(mission.velocity_down),
-                float(mission.yaw_rate),
-            )
-            if not safe:
-                self.publish_idle(reason, desired_yaw=yaw)
-                return
-
-            command = self.make_command(
-                CMD_VELOCITY,
-                STATUS_SENT,
-                executed=True,
-                velocity_forward=forward,
-                velocity_right=right,
-                velocity_down=down,
-                yaw_rate=yaw,
-            )
-            self.last_command_forward = forward
-            self.last_command_right = right
-            self.last_command_down = down
-            self.last_command_yaw = yaw
-            self.command_pub.publish(command)
-            self.command_count += 1
-            self.executed_command_count += 1
-            self.diagnostics.mark_published(
-                self.control_command_topic,
-                summary=f"commands={self.command_count}, mode={mission_mode}, forward={forward:.3f}, status={STATUS_SENT}",
-            )
+        safe, reason = self.check_safety(current_time)
+        if not safe:
+            self.publish_idle(reason)
             return
 
+        if not self.capture_position_hold_anchor(current_time):
+            self.publish_idle(STATUS_BLOCKED_NO_LOCAL_POSITION)
+            return
+
+        # Stage 1 mission: hold the captured takeoff/local NED coordinate and
+        # only change yaw. This prevents body-frame velocity drift from wind/GPS
+        # controller bias while we test YOLO yaw behavior.
         if mission_mode in ("IDLE", "HOLD"):
-            self.publish_idle(f"MISSION_{mission_mode}")
+            self.publish_position_hold(f"MISSION_{mission_mode}", yaw_rate=0.0, update_yaw=False)
+            return
+
+        if mission_mode == "FLY_FORWARD":
+            self.publish_position_hold("POSITION_HOLD_TRANSLATION_DISABLED_FOR_STAGE1", yaw_rate=0.0, update_yaw=False)
             return
 
         if self.last_target_error is None:
-            self.publish_idle(STATUS_NO_TARGET)
+            self.publish_position_hold(STATUS_NO_TARGET, yaw_rate=0.0, update_yaw=False)
             return
 
         target_age = current_time - self.last_target_error_time
@@ -621,10 +750,12 @@ class ControlNode(Node):
                 )
                 self.target_locked = False
 
-            self.publish_idle(
+            self.publish_position_hold(
                 f"{STATUS_TARGET_STALE} ({target_age:.2f}s)",
+                yaw_rate=0.0,
                 source_error_x=float(self.last_target_error.error_x),
                 source_error_y=float(self.last_target_error.error_y),
+                update_yaw=False,
             )
             return
 
@@ -633,78 +764,35 @@ class ControlNode(Node):
         desired_yaw = error_x * self.gain_yaw
 
         if not (target.target_visible and target.tracking_state == "LOCKED"):
-            self.publish_idle(
+            self.publish_position_hold(
                 STATUS_TARGET_NOT_VISIBLE,
+                yaw_rate=0.0,
                 source_error_x=float(target.error_x),
                 source_error_y=float(target.error_y),
-                desired_yaw=desired_yaw,
+                update_yaw=False,
             )
             return
 
-        desired_forward = 0.0
-        desired_right = 0.0
-        desired_down = 0.0
+        # No forward/right/down in this stage. APPROACH/ORBIT stay in the same
+        # position-hold+yaw behavior until we add true NED waypoint math.
+        _, _, _, yaw = self.limit_motion(0.0, 0.0, 0.0, desired_yaw)
 
-        if mission_mode == "APPROACH_TARGET":
-            desired_distance = float(mission.desired_distance_m) if mission is not None and mission.desired_distance_m > 0.0 else self.desired_distance_m
-            desired_forward = self.get_distance_forward_correction(target, desired_distance)
-        elif mission_mode == "ORBIT_TARGET":
-            desired_distance = float(mission.orbit_radius_m) if mission is not None and mission.orbit_radius_m > 0.0 else self.desired_distance_m
-            desired_forward = self.get_distance_forward_correction(target, desired_distance)
-            orbit_speed = float(mission.orbit_speed_m_s) if mission is not None and mission.orbit_speed_m_s != 0.0 else self.orbit_speed_m_s
-            desired_right = orbit_speed
-        elif mission_mode == "TRACK_CENTER":
-            desired_forward = 0.0
-            desired_right = 0.0
-        else:
-            self.publish_idle(
+        if mission_mode not in ("TRACK_CENTER", "APPROACH_TARGET", "ORBIT_TARGET"):
+            self.publish_position_hold(
                 f"UNKNOWN_MISSION_MODE:{mission_mode}",
+                yaw_rate=0.0,
                 source_error_x=float(target.error_x),
                 source_error_y=float(target.error_y),
-                desired_yaw=desired_yaw,
+                update_yaw=False,
             )
             return
 
-        forward, right, down, yaw = self.limit_motion(desired_forward, desired_right, desired_down, desired_yaw)
-
-        safe, reason = self.check_safety(current_time)
-        if not safe:
-            self.publish_idle(
-                reason,
-                source_error_x=float(target.error_x),
-                source_error_y=float(target.error_y),
-                desired_yaw=yaw,
-            )
-            return
-
-        command = self.make_command(
-            CMD_VELOCITY,
+        self.publish_position_hold(
             STATUS_SENT,
-            executed=True,
-            velocity_forward=forward,
-            velocity_right=right,
-            velocity_down=down,
             yaw_rate=yaw,
             source_error_x=float(target.error_x),
             source_error_y=float(target.error_y),
-        )
-
-        self.last_command_forward = forward
-        self.last_command_right = right
-        self.last_command_down = down
-        self.last_command_yaw = yaw
-
-        self.command_pub.publish(command)
-        self.command_count += 1
-        self.executed_command_count += 1
-
-        self.diagnostics.mark_published(
-            self.control_command_topic,
-            summary=(
-                f"commands={self.command_count}, executed={self.executed_command_count}, "
-                f"mode={mission_mode}, forward={forward:.3f}, right={right:.3f}, yaw={yaw:.3f}, "
-                f"status={STATUS_SENT}"
-            ),
+            update_yaw=True,
         )
 
     def report_status(self) -> None:

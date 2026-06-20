@@ -83,7 +83,7 @@ telemetry_node:
     require_armed_for_offboard: true
     min_battery_percent: 20.0
     max_yaw_rate_rad_s: 1.0
-    allow_translation_commands: false  # yaw-only; forward/right/down forced to zero
+    allow_translation_commands: false  # legacy VELOCITY translation disabled; smart mission uses POSITION hold+yaw
     stop_offboard_on_disable: true
 
     # MAVSDK Action commands: TAKEOFF, LAND, RTL, DO_ORBIT.
@@ -185,9 +185,9 @@ control_node:
     # error is normalized image coords in [-1, 1] after deadband
     # ============================================================
     gain_yaw: 0.8        # rad/s per unit error_x   -> turn toward target
-    gain_down: 0.3       # reserved; altitude control disabled in yaw-only mode
+    gain_down: 0.3       # reserved; altitude translation disabled in position-hold-yaw mode
     gain_forward: 1.0    # unused until area-based forward control is added
-    gain_right: 1.0      # unused in yaw-only lateral mode
+    gain_right: 1.0      # unused while stage 1 holds local NED position
 
     # ============================================================
     # Deadband — ignore tiny errors near image center
@@ -201,7 +201,7 @@ control_node:
     # ============================================================
     max_velocity_forward: 2.0   # m/s
     max_velocity_right: 2.0     # m/s   (effectively unused; strafe held at 0)
-    max_velocity_down: 0.5      # reserved; output held at 0 in yaw-only mode
+    max_velocity_down: 0.5      # reserved; output held by local NED position setpoint in stage 1
     max_yaw_rate: 1.0           # rad/s ~57 deg/s
 
     # ============================================================
@@ -211,7 +211,7 @@ control_node:
     # ============================================================
     max_accel_forward: 1.5      # m/s^2
     max_accel_right: 1.5        # m/s^2
-    max_accel_down: 0.5         # reserved; output held at 0 in yaw-only mode
+    max_accel_down: 0.5         # reserved; output held by local NED position setpoint in stage 1
     max_yaw_accel: 2.0          # rad/s^2
 
     # ============================================================
@@ -220,7 +220,7 @@ control_node:
     min_battery_percent: 25.0   # block commands below this
     require_gps: false          # set true for outdoor flight
     require_armed: true         # block commands until pilot arms
-    min_altitude_m: 2.0         # reserved; altitude output held at 0 in yaw-only mode
+    min_altitude_m: 2.0         # reserved; altitude held by local NED down setpoint in stage 1
 
     # ============================================================
     # Timing

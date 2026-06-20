@@ -92,7 +92,7 @@ control_node:
     autonomy_enabled: false     # default safe; enable with /drone/autonomy/enabled when testing
 
     gain_yaw: 1.0
-    gain_down: 0.4       # reserved; altitude control disabled in yaw-only mode
+    gain_down: 0.4       # reserved; altitude translation disabled in position-hold-yaw mode
     gain_forward: 1.0
     gain_right: 1.0
 
@@ -101,12 +101,12 @@ control_node:
 
     max_velocity_forward: 3.0
     max_velocity_right: 3.0
-    max_velocity_down: 1.0      # reserved; output held at 0 in yaw-only mode
+    max_velocity_down: 1.0      # reserved; output held by local NED position setpoint in stage 1
     max_yaw_rate: 1.5
 
     max_accel_forward: 2.0
     max_accel_right: 2.0
-    max_accel_down: 1.0         # reserved; output held at 0 in yaw-only mode
+    max_accel_down: 1.0         # reserved; output held by local NED position setpoint in stage 1
     max_yaw_accel: 3.0
 
     min_battery_percent: 10.0    # sim batteries don't matter
