@@ -1,0 +1,274 @@
+# Parameters for full system mode (real camera + real drone)
+
+camera_node:
+  ros__parameters:
+    image_topic: "/drone/camera/image_raw"
+    frame_id: "camera_optical_frame"
+    buffer_size: 1
+    camera_index: 0
+    frame_width: 640
+    frame_height: 480
+    fps: 30.0
+    reconnect_interval: 3.0
+    max_reconnect_attempts: 10
+    camera_backend: "v4l2"
+
+yolo_node:
+  ros__parameters:
+    detections_topic: "/drone/vision/detections"
+    image_topic: "/drone/camera/image_raw"
+    process_every_n_frames: 1
+    model_path: "/home/robotpi/drone_ws/src/drone_object_tracker_ros/models/red_ball_ncnn_model"
+    confidence_threshold: 0.25
+    iou_threshold: 0.45
+    device: "cpu"
+    input_size: 320
+    max_detections: 20
+    half_precision: false
+    verbose: false
+    target_class: "red_ball"
+
+tracker_node:
+  ros__parameters:
+    detections_topic: "/drone/vision/detections"
+    target_error_topic: "/drone/tracking/target_error"
+    target_class: "red_ball"
+    min_confidence: 0.25
+    detection_timeout: 1.5
+    reacquisition_timeout: 4.0
+    smoothing_alpha: 0.35
+    target_area_min: 0.002
+    target_area_max: 0.7
+    publish_rate: 30.0
+    proximity_threshold: 0.12
+    stale_detection_timeout: 2.5
+    missed_detection_threshold: 2
+    coast_timeout: 2.0
+    lock_confirm_frames: 1
+
+    # Monocular ball distance estimate. Prefer calibrating distance_calibration_k with tape:
+    # K = measured_distance_m * bbox_diameter_px. If K is 0, focal/FOV estimate is used.
+    estimate_distance: true
+    distance_calibration_k: 0.0
+    ball_diameter_m: 0.20
+    focal_length_px: 0.0
+    horizontal_fov_deg: 70.0
+    vertical_fov_deg: 55.0
+    image_width_px: 640
+    image_height_px: 480
+    min_distance_m: 0.25
+    max_distance_m: 12.0
+    distance_filter_alpha: 0.25
+
+telemetry_node:
+  ros__parameters:
+    telemetry_topic: "/drone/telemetry"
+    connection_url: "serial:///dev/ttyACM0:57600"
+    publish_rate: 10.0
+    reconnect_interval: 5.0
+    connection_timeout: 10.0
+
+    # ============================================================
+    # MAVSDK command bridge
+    # This same node owns the single MAVSDK/Pixhawk connection, so
+    # telemetry and commands do not fight over /dev/ttyACM0.
+    # ============================================================
+    control_command_topic: "/drone/control/command"
+    offboard_enable_topic: "/drone/mavsdk/offboard_enable"
+    command_status_topic: "/drone/mavsdk/command_status"
+    action_command_topic: "/drone/mavsdk/action_command"
+    mavsdk_offboard_enabled: false  # second hard gate; enable with /drone/mavsdk/offboard_enable
+    command_rate: 20.0
+    command_timeout: 0.5
+    require_armed_for_offboard: true
+    min_battery_percent: 20.0
+    max_yaw_rate_rad_s: 1.0
+    allow_translation_commands: false  # yaw-only; forward/right/down forced to zero
+    stop_offboard_on_disable: true
+
+    # MAVSDK Action commands: TAKEOFF, LAND, RTL, DO_ORBIT.
+    # Blocked by default. Keep false unless testing in a safe simulation/controlled setup.
+    allow_mavsdk_actions: false
+    action_command_timeout: 3.0
+
+autonomy_manager_node:
+  ros__parameters:
+    autonomy_request_topic: "/drone/autonomy/request"
+    offboard_request_topic: "/drone/mavsdk/offboard_request"
+    target_error_topic: "/drone/tracking/target_error"
+    telemetry_topic: "/drone/telemetry"
+    autonomy_enable_topic: "/drone/autonomy/enabled"
+    offboard_enable_topic: "/drone/mavsdk/offboard_enable"
+    autonomy_state_topic: "/drone/autonomy/state"
+
+    # One central state machine owns the gates. Keep request false by default.
+    manager_enabled: true
+    initial_autonomy_request: false
+    initial_offboard_request: false
+    publish_rate: 10.0
+
+    # Timing
+    target_timeout: 1.0
+    telemetry_timeout: 2.0
+    request_timeout: 0.0  # 0 = latch request until an explicit false message arrives
+
+    # Offboard executor can be enabled while READY/TARGET_LOST, but real movement
+    # stays blocked until state == TRACKING and /drone/autonomy/enabled is true.
+    enable_offboard_when_ready: true
+
+    # Safety requirements
+    require_connected: true
+    require_armed: true
+    require_health_all_ok: false
+    require_gps: false
+    required_flight_mode: ""  # leave blank to avoid Offboard chicken/egg during early testing
+    min_battery_percent: 20.0
+
+mission_executor_node:
+  ros__parameters:
+    mission_enabled: false
+    auto_start: false
+    mission_request_topic: "/drone/mission/request"
+    mission_command_topic: "/drone/mission/command"
+    mission_state_topic: "/drone/mission/state"
+    mavsdk_action_topic: "/drone/mavsdk/action_command"
+    target_error_topic: "/drone/tracking/target_error"
+    telemetry_topic: "/drone/telemetry"
+    publish_rate: 10.0
+
+    # Ball orbit return mission:
+    # 1 takeoff, 2 fly forward, 3 detect ball, 4 approach, 5 orbit, 6 RTL, 7 land.
+    takeoff_altitude_m: 2.0
+    fly_forward_speed_m_s: 0.4
+    fly_forward_duration_s: 3.0
+    wait_for_target_timeout_s: 20.0
+    target_timeout_s: 2.0
+    desired_approach_distance_m: 2.0
+    approach_distance_tolerance_m: 0.25
+    approach_timeout_s: 20.0
+    orbit_radius_m: 2.0
+    orbit_speed_m_s: 0.4
+    orbit_revolutions: 1.0
+    orbit_timeout_s: 45.0
+    rtl_wait_s: 10.0
+    land_wait_s: 10.0
+
+    # Prefer PX4/MAV_CMD_DO_ORBIT once target center can be estimated.
+    use_mavsdk_do_orbit: true
+    require_distance_for_orbit: true
+    require_target_centered_for_orbit: true
+    center_error_threshold: 0.15
+
+control_node:
+  ros__parameters:
+    target_error_topic: "/drone/tracking/target_error"
+    telemetry_topic: "/drone/telemetry"
+    control_command_topic: "/drone/control/command"
+    mission_command_topic: "/drone/mission/command"
+    # ============================================================
+    # SAFETY — leave autonomy_enabled FALSE until bench-tested
+    # ============================================================
+    autonomy_enabled: false
+
+    # ============================================================
+    # Control gains (proportional)
+    # error is normalized image coords in [-1, 1] after deadband
+    # ============================================================
+    gain_yaw: 0.8        # rad/s per unit error_x   -> turn toward target
+    gain_down: 0.3       # reserved; altitude control disabled in yaw-only mode
+    gain_forward: 1.0    # unused until area-based forward control is added
+    gain_right: 1.0      # unused in yaw-only lateral mode
+
+    # ============================================================
+    # Deadband — ignore tiny errors near image center
+    # Must be in [0, 1). 0.05 ≈ ±5% of half-frame.
+    # ============================================================
+    deadband_x: 0.05
+    deadband_y: 0.05
+
+    # ============================================================
+    # Velocity / yaw-rate clamps (hard caps on output)
+    # ============================================================
+    max_velocity_forward: 2.0   # m/s
+    max_velocity_right: 2.0     # m/s   (effectively unused; strafe held at 0)
+    max_velocity_down: 0.5      # reserved; output held at 0 in yaw-only mode
+    max_yaw_rate: 1.0           # rad/s ~57 deg/s
+
+    # ============================================================
+    # Acceleration limits (physical units, scaled by control period)
+    # These set how fast the commanded velocity can CHANGE.
+    # Lower = smoother but laggier; higher = snappier but jerkier.
+    # ============================================================
+    max_accel_forward: 1.5      # m/s^2
+    max_accel_right: 1.5        # m/s^2
+    max_accel_down: 0.5         # reserved; output held at 0 in yaw-only mode
+    max_yaw_accel: 2.0          # rad/s^2
+
+    # ============================================================
+    # Safety gates
+    # ============================================================
+    min_battery_percent: 25.0   # block commands below this
+    require_gps: false          # set true for outdoor flight
+    require_armed: true         # block commands until pilot arms
+    min_altitude_m: 2.0         # reserved; altitude output held at 0 in yaw-only mode
+
+    # ============================================================
+    # Timing
+    # ============================================================
+    control_rate: 20.0          # Hz   (control loop frequency)
+    target_timeout: 1.0         # s    target_error stale after this
+    mission_command_timeout: 1.0
+
+    # Distance/mission control. Translation is still blocked in telemetry unless explicitly enabled there.
+    desired_distance_m: 2.0
+    distance_gain_forward: 0.6
+    target_area_goal: 0.08
+    orbit_speed_m_s: 0.30
+    telemetry_timeout: 2.0      # s    telemetry stale after this
+
+visualizer_node:
+  ros__parameters:
+    image_topic: "/drone/camera/image_raw"
+    detections_topic: "/drone/vision/detections"
+    target_error_topic: "/drone/tracking/target_error"
+    telemetry_topic: "/drone/telemetry"
+    control_command_topic: "/drone/control/command"
+    window_name: "Drone Vision System (FULL SYSTEM)"
+    display_width: 960
+    display_height: 720
+    show_detections: true
+    show_tracking: true
+    show_telemetry: true
+    show_control: true
+    display_fps: 30.0
+    headless: true
+
+health_monitor_node:
+  ros__parameters:
+    image_topic: "/drone/camera/image_raw"
+    detections_topic: "/drone/vision/detections"
+    target_error_topic: "/drone/tracking/target_error"
+    telemetry_topic: "/drone/telemetry"
+    control_command_topic: "/drone/control/command"
+    mavsdk_command_status_topic: "/drone/mavsdk/command_status"
+    monitor_mavsdk_command_status: true
+    heartbeat_period: 2.0
+    stale_seconds: 2.0
+
+dashboard_node:
+  ros__parameters:
+    host: "0.0.0.0"
+    port: 8080
+    image_topic: "/drone/camera/image_raw"
+    detections_topic: "/drone/vision/detections"
+    target_error_topic: "/drone/tracking/target_error"
+    telemetry_topic: "/drone/telemetry"
+    control_command_topic: "/drone/control/command"
+    autonomy_request_topic: "/drone/autonomy/request"
+    mavsdk_request_topic: "/drone/mavsdk/offboard_request"
+    mission_request_topic: "/drone/mission/request"
+    autonomy_enable_topic: "/drone/autonomy/enabled"
+    offboard_enable_topic: "/drone/mavsdk/offboard_enable"
+    autonomy_state_topic: "/drone/autonomy/state"
+    mission_state_topic: "/drone/mission/state"
+    mavsdk_command_status_topic: "/drone/mavsdk/command_status"

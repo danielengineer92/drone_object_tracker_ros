@@ -1,0 +1,164 @@
+# Parameters for simulation mode (no hardware required)
+
+fake_camera_node:
+  ros__parameters:
+    image_topic: "/drone/camera/image_raw"
+    frame_id: "camera_optical_frame"
+    frame_width: 640
+    frame_height: 480
+    fps: 30.0
+    target_type: "person_like"
+    motion_pattern: "sinusoidal"
+    motion_speed: 0.8
+    add_noise: true
+    noise_level: 8
+
+fake_detection_node:
+  ros__parameters:
+    detections_topic: "/drone/vision/detections"
+    publish_rate: 15.0
+    target_class: "red_ball"
+    target_class_id: 0
+    base_confidence: 0.82
+    confidence_noise: 0.08
+    motion_pattern: "sinusoidal"
+    motion_speed: 0.8
+    image_width: 640
+    image_height: 480
+    detection_dropout_rate: 0.05
+    add_false_detections: true
+    false_detection_rate: 0.08
+
+fake_telemetry_node:
+  ros__parameters:
+    telemetry_topic: "/drone/telemetry"
+    publish_rate: 10.0
+    simulate_armed: false
+    simulate_flying: false
+    initial_battery_percent: 78.0
+    battery_drain_rate: 0.005
+    base_latitude: 47.3769
+    base_longitude: 8.5417
+    base_altitude: 408.0
+    flight_altitude: 0.0
+    flight_mode: "MANUAL"
+    gps_satellites: 14
+    simulate_gps_noise: true
+
+tracker_node:
+  ros__parameters:
+    detections_topic: "/drone/vision/detections"
+    target_error_topic: "/drone/tracking/target_error"
+    target_class: "red_ball"
+    min_confidence: 0.4
+    detection_timeout: 2.0
+    reacquisition_timeout: 5.0
+    smoothing_alpha: 0.4
+    target_area_min: 0.001
+    target_area_max: 0.8
+    publish_rate: 30.0
+    proximity_threshold: 0.15
+
+
+autonomy_manager_node:
+  ros__parameters:
+    autonomy_request_topic: "/drone/autonomy/request"
+    offboard_request_topic: "/drone/mavsdk/offboard_request"
+    target_error_topic: "/drone/tracking/target_error"
+    telemetry_topic: "/drone/telemetry"
+    autonomy_enable_topic: "/drone/autonomy/enabled"
+    offboard_enable_topic: "/drone/mavsdk/offboard_enable"
+    autonomy_state_topic: "/drone/autonomy/state"
+    manager_enabled: true
+    initial_autonomy_request: false
+    initial_offboard_request: false
+    publish_rate: 10.0
+    target_timeout: 1.0
+    telemetry_timeout: 2.0
+    request_timeout: 0.0
+    enable_offboard_when_ready: true
+    require_connected: true
+    require_armed: false
+    require_health_all_ok: false
+    require_gps: false
+    required_flight_mode: ""
+    min_battery_percent: 0.0
+
+control_node:
+  ros__parameters:
+    target_error_topic: "/drone/tracking/target_error"
+    telemetry_topic: "/drone/telemetry"
+    control_command_topic: "/drone/control/command"
+    autonomy_enabled: false     # default safe; enable with /drone/autonomy/enabled when testing
+
+    gain_yaw: 1.0
+    gain_down: 0.4       # reserved; altitude control disabled in yaw-only mode
+    gain_forward: 1.0
+    gain_right: 1.0
+
+    deadband_x: 0.03
+    deadband_y: 0.03
+
+    max_velocity_forward: 3.0
+    max_velocity_right: 3.0
+    max_velocity_down: 1.0      # reserved; output held at 0 in yaw-only mode
+    max_yaw_rate: 1.5
+
+    max_accel_forward: 2.0
+    max_accel_right: 2.0
+    max_accel_down: 1.0         # reserved; output held at 0 in yaw-only mode
+    max_yaw_accel: 3.0
+
+    min_battery_percent: 10.0    # sim batteries don't matter
+    require_gps: false
+    require_armed: false       # sim only: fake telemetry starts disarmed
+    min_altitude_m: 0.0        # sim only: allow command math at ground altitude
+
+    control_rate: 20.0
+    target_timeout: 1.0
+    telemetry_timeout: 2.0
+
+visualizer_node:
+  ros__parameters:
+    image_topic: "/drone/camera/image_raw"
+    detections_topic: "/drone/vision/detections"
+    target_error_topic: "/drone/tracking/target_error"
+    telemetry_topic: "/drone/telemetry"
+    control_command_topic: "/drone/control/command"
+    window_name: "Drone Vision System (SIMULATION)"
+    display_width: 960
+    display_height: 720
+    show_detections: true
+    show_tracking: true
+    show_telemetry: true
+    show_control: true
+    display_fps: 30.0
+    headless: true
+
+health_monitor_node:
+  ros__parameters:
+    image_topic: "/drone/camera/image_raw"
+    detections_topic: "/drone/vision/detections"
+    target_error_topic: "/drone/tracking/target_error"
+    telemetry_topic: "/drone/telemetry"
+    control_command_topic: "/drone/control/command"
+    mavsdk_command_status_topic: "/drone/mavsdk/command_status"
+    monitor_mavsdk_command_status: false
+    heartbeat_period: 2.0
+    stale_seconds: 2.0
+
+dashboard_node:
+  ros__parameters:
+    host: "0.0.0.0"
+    port: 8080
+    image_topic: "/drone/camera/image_raw"
+    detections_topic: "/drone/vision/detections"
+    target_error_topic: "/drone/tracking/target_error"
+    telemetry_topic: "/drone/telemetry"
+    control_command_topic: "/drone/control/command"
+    autonomy_request_topic: "/drone/autonomy/request"
+    mavsdk_request_topic: "/drone/mavsdk/offboard_request"
+    autonomy_enable_topic: "/drone/autonomy/enabled"
+    offboard_enable_topic: "/drone/mavsdk/offboard_enable"
+    autonomy_state_topic: "/drone/autonomy/state"
+    mavsdk_command_status_topic: "/drone/mavsdk/command_status"

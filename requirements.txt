@@ -1,0 +1,21 @@
+# Python dependencies for the drone vision system
+# Install with: pip install -r requirements.txt
+
+# Core ROS 2 Python dependencies (installed via apt/rosdep typically)
+# rclpy
+# sensor_msgs
+# std_msgs
+# cv_bridge
+
+# OpenCV
+opencv-python>=4.8.0
+opencv-contrib-python>=4.8.0
+
+# Ultralytics YOLO
+ultralytics>=8.0.0
+
+# MAVSDK
+mavsdk>=1.4.0
+
+# NumPy
+numpy>=1.24.0

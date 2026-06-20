@@ -1,0 +1,10 @@
+build/
+install/
+log/
+__pycache__/
+*.pyc
+*.patch
+.venv/
+venv/
+*.bag
+*.db3
