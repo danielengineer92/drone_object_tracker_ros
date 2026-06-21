@@ -15,7 +15,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, LogInfo
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
@@ -64,6 +64,12 @@ def generate_launch_description() -> LaunchDescription:
         description='SITL/dev only: allow mission TAKEOFF/LAND/RTL/HOLD actions through MAVSDK'
     )
 
+    detector_arg = DeclareLaunchArgument(
+        'detector',
+        default_value='yolo',
+        description="Detector to run: 'yolo' (neural) or 'color' (OpenCV color/HSV, for a known-color target)."
+    )
+
     mission_plan_file_arg = DeclareLaunchArgument(
         'mission_plan_file',
         default_value='',
@@ -105,6 +111,9 @@ def generate_launch_description() -> LaunchDescription:
         output='screen',
     )
 
+    use_yolo = IfCondition(PythonExpression(["'", LaunchConfiguration('detector'), "' == 'yolo'"]))
+    use_color = IfCondition(PythonExpression(["'", LaunchConfiguration('detector'), "' == 'color'"]))
+
     yolo = Node(
         package='drone_yolo',
         executable='yolo_node',
@@ -117,6 +126,16 @@ def generate_launch_description() -> LaunchDescription:
             },
         ],
         output='screen',
+        condition=use_yolo,
+    )
+
+    color_detection = Node(
+        package='drone_yolo',
+        executable='color_detection_node',
+        name='color_detection_node',
+        parameters=[config_file, {'target_class': LaunchConfiguration('target_class')}],
+        output='screen',
+        condition=use_color,
     )
 
     tracker = Node(
@@ -233,6 +252,7 @@ def generate_launch_description() -> LaunchDescription:
         target_class_arg,
         connection_url_arg,
         allow_mavsdk_actions_arg,
+        detector_arg,
         mission_plan_file_arg,
         LogInfo(msg='=== DRONE VISION SYSTEM - FULL SYSTEM MODE ==='),
         LogInfo(msg='Real camera + YOLO + PX4 MAVSDK bridge active.'),
@@ -253,6 +273,7 @@ def generate_launch_description() -> LaunchDescription:
         LogInfo(msg="Disable autonomy: ros2 topic pub --once /drone/autonomy/request std_msgs/msg/Bool '{data: false}'"),
         camera,
         yolo,
+        color_detection,
         tracker,
         telemetry,
         autonomy_manager,

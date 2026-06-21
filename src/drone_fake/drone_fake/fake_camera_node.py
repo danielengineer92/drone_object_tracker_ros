@@ -159,6 +159,15 @@ class FakeCameraNode(Node):
 
         return frame
 
+    def _draw_red_ball(self, frame: np.ndarray, x: int, y: int) -> np.ndarray:
+        """Draw a solid, high-saturation red ball for color-detection testing."""
+        radius = 26
+        cv2.circle(frame, (x, y), radius, (0, 0, 215), -1)   # BGR: saturated red
+        cv2.circle(frame, (x, y), radius, (0, 0, 140), 2)    # darker red rim
+        # A small highlight, like a real ball, that stays inside the red mask.
+        cv2.circle(frame, (x - radius // 3, y - radius // 3), max(3, radius // 5), (60, 60, 255), -1)
+        return frame
+
     def _draw_simple_target(self, frame: np.ndarray, x: int, y: int) -> np.ndarray:
         """
         Draw a simple colored rectangle target.
@@ -212,6 +221,8 @@ class FakeCameraNode(Node):
         # Draw target
         if self._target_type == 'person_like':
             frame = self._draw_person_like_target(frame, target_x, target_y)
+        elif self._target_type == 'red_ball':
+            frame = self._draw_red_ball(frame, target_x, target_y)
         else:
             frame = self._draw_simple_target(frame, target_x, target_y)
 

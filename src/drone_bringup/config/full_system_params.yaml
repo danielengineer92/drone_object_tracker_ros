@@ -28,6 +28,31 @@ yolo_node:
     verbose: false
     target_class: "red_ball"
 
+# OpenCV color detector — drop-in alternative to yolo_node for a known-color
+# target (e.g. a red ball). Select it with detector:=color at launch.
+color_detection_node:
+  ros__parameters:
+    image_topic: "/drone/camera/image_raw"
+    detections_topic: "/drone/vision/detections"
+    target_class: "red_ball"
+    class_id: 0
+    max_detections: 1
+    process_every_n_frames: 1
+    # Red wraps the hue circle, so two hue bands share the sat/val floors.
+    h_min1: 0
+    h_max1: 10
+    h_min2: 170
+    h_max2: 179
+    s_min: 120
+    s_max: 255
+    v_min: 70
+    v_max: 255
+    min_radius_px: 6
+    max_radius_px: 100000
+    blur_ksize: 5
+    morph_ksize: 5
+    min_fill_ratio: 0.55
+
 tracker_node:
   ros__parameters:
     detections_topic: "/drone/vision/detections"

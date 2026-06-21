@@ -145,6 +145,21 @@ ros2 launch drone_bringup full_system_launch.py \
   allow_mavsdk_actions:=true
 ```
 
+Color detector instead of YOLO (cheap OpenCV HSV detection for a known-color
+target like a red ball — no model, no torch):
+
+```bash
+ros2 launch drone_bringup full_system_launch.py \
+  connection_url:="serial:///dev/ttyACM0:57600" \
+  detector:=color \
+  target_class:=red_ball
+```
+
+`detector:=yolo` (default) keeps the neural detector. The color detector
+(`color_detection_node`) publishes the same `DetectionArray`, so the tracker and
+everything downstream is unchanged. Tune the HSV bands under `color_detection_node`
+in `full_system_params.yaml`. Requires `ros-jazzy-cv-bridge` (and `python3-opencv`).
+
 PX4 SITL orbit test (real MAVSDK bridge + faked vision, no camera/YOLO):
 
 ```bash

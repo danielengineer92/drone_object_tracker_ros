@@ -20,6 +20,7 @@ setup(
     entry_points={
         'console_scripts': [
             'yolo_node = drone_yolo.yolo_node:main',
+            'color_detection_node = drone_yolo.color_detection_node:main',
         ],
     },
 )
