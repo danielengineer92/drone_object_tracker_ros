@@ -23,10 +23,13 @@ SITL/dev setups can enable them intentionally.
 
 from __future__ import annotations
 
+import json
 import math
 import time
+from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional
+from pathlib import Path
+from typing import Optional, TextIO
 
 import rclpy
 from rclpy.node import Node
@@ -35,11 +38,19 @@ from std_msgs.msg import Bool, String
 
 from drone_interfaces.msg import DroneTelemetry, MavsdkActionCommand, MissionCommand, TargetError
 from drone_diagnostics.node_diagnostics import NodeDiagnostics
+from drone_control.mission_plan import (
+    MissionPlan,
+    MissionPlanError,
+    build_default_plan,
+    lint_plan,
+    load_mission_plan,
+)
 
 
 class MissionState(Enum):
     DISABLED = "DISABLED"
     IDLE = "IDLE"
+    HOLD = "HOLD"
     PREFLIGHT = "PREFLIGHT"
     TAKEOFF = "TAKEOFF"
     PRIME_OFFBOARD = "PRIME_OFFBOARD"
@@ -84,12 +95,16 @@ class MissionExecutorNode(Node):
         self.declare_parameter("require_connected_for_mission", True)
         self.declare_parameter("require_armed_for_mission", True)
         self.declare_parameter("telemetry_timeout_s", 2.0)
-        self.declare_parameter("takeoff_altitude_m", 2.0)
-        self.declare_parameter("airborne_altitude_m", 0.75)
+        self.declare_parameter("takeoff_altitude_m", 3.0)
+        self.declare_parameter("airborne_altitude_m", 2.7)
         self.declare_parameter("takeoff_timeout_s", 20.0)
         self.declare_parameter("offboard_prime_time_s", 1.5)
         self.declare_parameter("track_center_timeout_s", 0.0)  # 0 = keep yaw tracking until stopped.
         self.declare_parameter("run_full_orbit_after_track_center", False)
+
+        # Optional external YAML mission plan. Empty = use the built-in default plan,
+        # which reproduces the original hardcoded sequence (backward compatible).
+        self.declare_parameter("mission_plan_file", "")
 
         # Later/full mission behavior parameters. Kept so the old orbit path can be re-enabled later.
         self.declare_parameter("target_timeout_s", 2.0)
@@ -106,6 +121,8 @@ class MissionExecutorNode(Node):
         self.declare_parameter("require_distance_for_orbit", True)
         self.declare_parameter("require_target_centered_for_orbit", True)
         self.declare_parameter("center_error_threshold", 0.15)
+        self.declare_parameter("event_log_enabled", True)
+        self.declare_parameter("event_log_directory", "~/drone_mission_logs")
 
         self.mission_enabled = bool(self.get_parameter("mission_enabled").value)
         self.auto_start = bool(self.get_parameter("auto_start").value)
@@ -128,6 +145,7 @@ class MissionExecutorNode(Node):
         self.offboard_prime_time_s = float(self.get_parameter("offboard_prime_time_s").value)
         self.track_center_timeout_s = float(self.get_parameter("track_center_timeout_s").value)
         self.run_full_orbit_after_track_center = bool(self.get_parameter("run_full_orbit_after_track_center").value)
+        self.mission_plan_file = str(self.get_parameter("mission_plan_file").value).strip()
 
         self.target_timeout_s = float(self.get_parameter("target_timeout_s").value)
         self.desired_approach_distance_m = float(self.get_parameter("desired_approach_distance_m").value)
@@ -143,6 +161,8 @@ class MissionExecutorNode(Node):
         self.require_distance_for_orbit = bool(self.get_parameter("require_distance_for_orbit").value)
         self.require_target_centered_for_orbit = bool(self.get_parameter("require_target_centered_for_orbit").value)
         self.center_error_threshold = float(self.get_parameter("center_error_threshold").value)
+        self.event_log_enabled = bool(self.get_parameter("event_log_enabled").value)
+        self.event_log_directory = str(self.get_parameter("event_log_directory").value)
 
         self.state = MissionState.IDLE if self.mission_enabled else MissionState.DISABLED
         self.state_enter_time = time.time()
@@ -158,6 +178,10 @@ class MissionExecutorNode(Node):
         self.last_target_time = 0.0
         self.last_telemetry: Optional[DroneTelemetry] = None
         self.last_telemetry_time = 0.0
+        self._event_log_file: Optional[TextIO] = None
+        self._event_log_path: Optional[Path] = None
+        self._event_log_error_reported = False
+        self._last_logged_mission_command_key: Optional[tuple[str, str, bool]] = None
 
         qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=5)
         self.request_sub = self.create_subscription(Bool, self.mission_request_topic, self.mission_request_callback, qos)
@@ -180,6 +204,26 @@ class MissionExecutorNode(Node):
         self.diagnostics.add_output(self.autonomy_request_topic, "autonomy_request")
         self.diagnostics.add_output(self.offboard_request_topic, "mavsdk_offboard_request")
 
+        self._open_event_log()
+
+        # Load the mission plan (external YAML, or the built-in default) and set up
+        # the step cursor. The executor walks self.plan.steps instead of a hardcoded
+        # state chain. Each verb is dispatched to a _step_* handler.
+        self.plan: MissionPlan = self._load_plan()
+        self.step_index = 0
+        self.step_enter_time = time.time()
+        self._step_handlers = {
+            "takeoff": self._step_takeoff,
+            "prime_offboard": self._step_prime_offboard,
+            "track_center": self._step_track_center,
+            "approach": self._step_approach,
+            "orbit": self._step_orbit,
+            "rtl": self._step_rtl,
+            "land": self._step_land,
+            "hold": self._step_hold,
+            "complete": self._step_complete,
+        }
+
         self.get_logger().warning(
             f"Mission executor started | enabled={self.mission_enabled}, active={self.mission_active}, "
             f"request_topic={self.mission_request_topic}, state_topic={self.mission_state_topic}, "
@@ -187,25 +231,159 @@ class MissionExecutorNode(Node):
             f"autonomy_request_topic={self.autonomy_request_topic}, offboard_request_topic={self.offboard_request_topic}, "
             f"takeoff_altitude={self.takeoff_altitude_m:.1f}m, airborne_altitude={self.airborne_altitude_m:.1f}m"
         )
+        self.log_event(
+            "node_started",
+            mission_enabled=self.mission_enabled,
+            mission_active=self.mission_active,
+            takeoff_altitude_m=self.takeoff_altitude_m,
+            airborne_altitude_m=self.airborne_altitude_m,
+            event_log_path=str(self._event_log_path) if self._event_log_path else "",
+        )
         if not self.mission_enabled:
             self.get_logger().warning("Mission executor is disabled by parameter. Start Mission will stay DISABLED until enabled in config.")
 
+    def _open_event_log(self) -> None:
+        if not self.event_log_enabled:
+            return
+        try:
+            log_dir = Path(self.event_log_directory).expanduser()
+            log_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self._event_log_path = log_dir / f"mission_events_{stamp}.jsonl"
+            self._event_log_file = self._event_log_path.open("a", encoding="utf-8")
+            self.get_logger().warning(f"Mission event log: {self._event_log_path}")
+        except OSError as exc:
+            self._event_log_file = None
+            self._event_log_path = None
+            self._event_log_error_reported = True
+            self.get_logger().warning(f"Mission event logging disabled; could not open log file: {exc}")
+
+    def _load_plan(self) -> MissionPlan:
+        """Resolve the active mission plan.
+
+        Uses the external YAML file when mission_plan_file is set; otherwise the
+        built-in default plan (which reproduces the original hardcoded sequence).
+        A load failure is logged and falls back to the default so the node never
+        crashes on a bad plan file.
+        """
+        if self.mission_plan_file:
+            try:
+                plan = load_mission_plan(self.mission_plan_file)
+                self.get_logger().warning(
+                    f"Loaded mission plan '{plan.name}' from {self.mission_plan_file} "
+                    f"| {len(plan.steps)} steps: {[s.type for s in plan.steps]}"
+                )
+                self.log_event(
+                    "mission_plan_loaded",
+                    source=self.mission_plan_file,
+                    plan=plan.name,
+                    steps=[s.type for s in plan.steps],
+                )
+            except MissionPlanError as exc:
+                self.get_logger().error(
+                    f"Failed to load mission plan '{self.mission_plan_file}': {exc}. "
+                    "Falling back to built-in default plan."
+                )
+                self.log_event("mission_plan_load_failed", source=self.mission_plan_file, error=str(exc))
+                plan = build_default_plan(self.run_full_orbit_after_track_center)
+        else:
+            plan = build_default_plan(self.run_full_orbit_after_track_center)
+            self.get_logger().warning(
+                f"Using built-in default mission plan | {len(plan.steps)} steps: "
+                f"{[s.type for s in plan.steps]} (run_full_orbit={self.run_full_orbit_after_track_center})"
+            )
+
+        for warning in lint_plan(plan):
+            self.get_logger().warning(f"Mission plan lint: {warning}")
+        return plan
+
+    def _telemetry_event_summary(self) -> Optional[dict[str, object]]:
+        if self.last_telemetry is None:
+            return None
+        return {
+            "age_s": round(time.time() - self.last_telemetry_time, 3),
+            "connected": bool(self.last_telemetry.connected),
+            "armed": bool(self.last_telemetry.armed),
+            "flight_mode": self.last_telemetry.flight_mode,
+            "landed_state": self.last_telemetry.landed_state,
+            "relative_altitude_m": round(float(self.last_telemetry.relative_altitude), 3),
+            "battery_percent": round(float(self.last_telemetry.battery_remaining_percent), 1),
+            "local_position_valid": bool(getattr(self.last_telemetry, "local_position_valid", False)),
+            "local_ned": [
+                round(float(getattr(self.last_telemetry, "local_position_north", 0.0)), 3),
+                round(float(getattr(self.last_telemetry, "local_position_east", 0.0)), 3),
+                round(float(getattr(self.last_telemetry, "local_position_down", 0.0)), 3),
+            ],
+        }
+
+    def _target_event_summary(self) -> Optional[dict[str, object]]:
+        if self.last_target is None:
+            return None
+        return {
+            "age_s": round(time.time() - self.last_target_time, 3),
+            "visible": bool(self.last_target.target_visible),
+            "tracking_state": self.last_target.tracking_state,
+            "class": self.last_target.target_class,
+            "confidence": round(float(self.last_target.target_confidence), 3),
+            "error_x": round(float(self.last_target.error_x), 3),
+            "error_y": round(float(self.last_target.error_y), 3),
+            "distance_valid": bool(getattr(self.last_target, "distance_valid", False)),
+            "distance_m": round(float(getattr(self.last_target, "distance_m", 0.0)), 3),
+        }
+
+    def log_event(self, event: str, **fields: object) -> None:
+        if self._event_log_file is None:
+            return
+        record: dict[str, object] = {
+            "ts_utc": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            "event": event,
+            "state": self.state.value,
+            "mission_active": bool(self.mission_active),
+        }
+        telemetry = self._telemetry_event_summary()
+        target = self._target_event_summary()
+        if telemetry is not None:
+            record["telemetry"] = telemetry
+        if target is not None:
+            record["target"] = target
+        record.update(fields)
+        try:
+            self._event_log_file.write(json.dumps(record, separators=(",", ":")) + "\n")
+            self._event_log_file.flush()
+        except OSError as exc:
+            self._event_log_file = None
+            if not self._event_log_error_reported:
+                self._event_log_error_reported = True
+                self.get_logger().warning(f"Mission event logging disabled after write failure: {exc}")
+
+    def destroy_node(self) -> bool:
+        self.log_event("node_shutdown")
+        if self._event_log_file is not None:
+            try:
+                self._event_log_file.close()
+            except OSError:
+                pass
+            self._event_log_file = None
+        return super().destroy_node()
+
     def mission_request_callback(self, msg: Bool) -> None:
         requested = bool(msg.data)
+        self.log_event("mission_request", requested=requested)
         if requested:
             if not self.mission_enabled:
                 self.get_logger().warning("Mission start requested but mission_enabled is false; staying DISABLED.")
+                self.log_event("mission_request_rejected", reason="mission_enabled_false")
                 self.state = MissionState.DISABLED
                 self.mission_active = False
                 self.publish_autonomy_request(False)
                 self.publish_offboard_request(False)
                 return
-            self.get_logger().warning("*** SMART YOLO TRACK-CENTER MISSION REQUESTED ***")
+            self.get_logger().warning(f"*** SMART MISSION REQUESTED | plan='{self.plan.name}' ***")
             self.mission_active = True
             self.actions_sent.clear()
             self.publish_autonomy_request(True)
             self.publish_offboard_request(False)
-            self.transition(MissionState.PREFLIGHT)
+            self._start_plan()
         else:
             self.get_logger().warning("Mission stop requested; publishing HOLD/IDLE and dropping autonomy/offboard requests.")
             self.mission_active = False
@@ -248,6 +426,7 @@ class MissionExecutorNode(Node):
         self.diagnostics.mark_published(self.autonomy_request_topic, summary=f"requested={enabled}")
         if changed:
             self.get_logger().warning(f"Mission executor autonomy request: {enabled}")
+            self.log_event("autonomy_request_published", requested=enabled)
 
     def publish_offboard_request(self, enabled: bool) -> None:
         enabled = bool(enabled)
@@ -263,16 +442,15 @@ class MissionExecutorNode(Node):
         self.diagnostics.mark_published(self.offboard_request_topic, summary=f"requested={enabled}")
         if changed:
             self.get_logger().warning(f"Mission executor MAVSDK Offboard request: {enabled}")
+            self.log_event("offboard_request_published", requested=enabled)
 
     def transition(self, new_state: MissionState) -> None:
         if new_state == self.state:
             return
         self.get_logger().warning(f"Mission state: {self.state.value} -> {new_state.value}")
+        self.log_event("state_transition", from_state=self.state.value, to_state=new_state.value)
         self.state = new_state
         self.state_enter_time = time.time()
-
-    def state_age(self) -> float:
-        return time.time() - self.state_enter_time
 
     def telemetry_is_fresh(self) -> bool:
         if self.last_telemetry is None:
@@ -296,10 +474,12 @@ class MissionExecutorNode(Node):
             return False
         altitude = float(self.last_telemetry.relative_altitude)
         landed_state = str(self.last_telemetry.landed_state).upper()
-        if "IN_AIR" in landed_state or "TAKING_OFF" in landed_state:
-            return True
         if "ON_GROUND" in landed_state or "LANDED" in landed_state:
             return False
+        if "TAKING_OFF" in landed_state:
+            return altitude >= self.airborne_altitude_m
+        if "IN_AIR" in landed_state:
+            return altitude >= self.airborne_altitude_m
         return altitude >= self.airborne_altitude_m
 
     def target_is_fresh_locked(self) -> bool:
@@ -326,7 +506,17 @@ class MissionExecutorNode(Node):
             return False
         return abs(float(self.last_target.distance_m) - self.desired_approach_distance_m) <= self.approach_distance_tolerance_m
 
-    def send_action_once(self, key: str, action: str, note: str = "") -> None:
+    def send_action_once(
+        self,
+        key: str,
+        action: str,
+        note: str = "",
+        *,
+        takeoff_altitude_m: Optional[float] = None,
+        radius_m: Optional[float] = None,
+        velocity_m_s: Optional[float] = None,
+        orbit_revolutions: Optional[float] = None,
+    ) -> None:
         if key in self.actions_sent:
             return
         self.actions_sent.add(key)
@@ -336,10 +526,10 @@ class MissionExecutorNode(Node):
         msg.command_id = int(self.action_command_id)
         msg.action = action
         msg.execute = True
-        msg.takeoff_altitude_m = float(self.takeoff_altitude_m)
-        msg.radius_m = float(self.orbit_radius_m)
-        msg.velocity_m_s = float(self.orbit_speed_m_s)
-        msg.orbit_revolutions = float(self.orbit_revolutions)
+        msg.takeoff_altitude_m = float(self.takeoff_altitude_m if takeoff_altitude_m is None else takeoff_altitude_m)
+        msg.radius_m = float(self.orbit_radius_m if radius_m is None else radius_m)
+        msg.velocity_m_s = float(self.orbit_speed_m_s if velocity_m_s is None else velocity_m_s)
+        msg.orbit_revolutions = float(self.orbit_revolutions if orbit_revolutions is None else orbit_revolutions)
         msg.yaw_behavior = "FRONT_TO_CIRCLE_CENTER"
         msg.latitude_deg = math.nan
         msg.longitude_deg = math.nan
@@ -357,6 +547,13 @@ class MissionExecutorNode(Node):
         self.action_pub.publish(msg)
         self.diagnostics.mark_published(self.mavsdk_action_topic, summary=f"id={msg.command_id}, action={action}, note={msg.note}")
         self.get_logger().warning(f"Mission requested MAVSDK action: id={msg.command_id}, action={action}, note={msg.note}")
+        self.log_event(
+            "mavsdk_action_requested",
+            command_id=int(msg.command_id),
+            action=action,
+            note=msg.note,
+            takeoff_altitude_m=round(float(msg.takeoff_altitude_m), 3),
+        )
 
     def estimate_target_global_center(self) -> Optional[tuple[float, float, float]]:
         if self.last_target is None or self.last_telemetry is None:
@@ -409,6 +606,17 @@ class MissionExecutorNode(Node):
 
         self.command_pub.publish(msg)
         self.diagnostics.mark_published(self.mission_command_topic, summary=f"mode={mode}, active={active}, status={status}")
+        command_key = (self.state.value, mode, bool(active))
+        if command_key != self._last_logged_mission_command_key:
+            self._last_logged_mission_command_key = command_key
+            self.log_event(
+                "mission_command_published",
+                mode=mode,
+                active=bool(active),
+                step_index=int(msg.step_index),
+                step_name=msg.step_name,
+                status=status,
+            )
 
     @staticmethod
     def step_index_for_state(state: MissionState) -> int:
@@ -441,134 +649,219 @@ class MissionExecutorNode(Node):
             self.publish_state("idle")
             return
 
-        age = self.state_age()
         self.publish_autonomy_request(True)
 
-        if self.state == MissionState.PREFLIGHT:
-            self.publish_offboard_request(False)
-            self.publish_mission_command("HOLD", True, "checking PX4 link, telemetry, and armed state")
-            ok, reason = self.preflight_ok()
-            if not ok:
-                self.publish_state(f"blocked: {reason}")
-                return
-            if self.is_airborne():
-                self.publish_state("already airborne; skipping takeoff")
-                self.transition(MissionState.PRIME_OFFBOARD)
-            else:
-                self.publish_state("armed on ground/low altitude; requesting takeoff")
-                self.transition(MissionState.TAKEOFF)
+        # Walk the mission plan: dispatch the current step's verb to its handler.
+        if self.step_index >= len(self.plan.steps):
+            self._enter_complete()
             return
 
-        if self.state == MissionState.TAKEOFF:
-            ok, reason = self.preflight_ok()
-            if not ok:
-                self.publish_state(f"takeoff blocked: {reason}")
-                self.publish_mission_command("HOLD", True, f"takeoff blocked: {reason}")
-                return
-            self.publish_offboard_request(False)
-            self.send_action_once("takeoff", "TAKEOFF", "smart mission takeoff before Offboard")
-            self.publish_mission_command("HOLD", True, "takeoff action requested; waiting until airborne")
-            self.publish_state(f"takeoff requested, airborne={self.is_airborne()}, age={age:.1f}/{self.takeoff_timeout_s:.1f}s")
-            if self.is_airborne():
-                self.transition(MissionState.PRIME_OFFBOARD)
-            elif age > self.takeoff_timeout_s:
-                # Stay in TAKEOFF instead of yawing on the ground. This catches disabled action gates.
-                self.publish_state("takeoff timeout; still waiting for airborne telemetry")
+        step = self.plan.steps[self.step_index]
+        self.transition(MissionState[step.state_name])  # keep state synced for logs/dashboard
+
+        handler = self._step_handlers.get(step.type)
+        if handler is None:
+            # Plans are validated at load time, so this should not normally happen.
+            self.publish_mission_command("HOLD", True, f"unknown step type {step.type}")
+            self.publish_state(f"unknown step type {step.type}")
             return
 
-        if self.state == MissionState.PRIME_OFFBOARD:
-            ok, reason = self.preflight_ok()
-            if not ok:
-                self.publish_state(f"prime blocked: {reason}")
-                self.publish_mission_command("HOLD", True, f"prime blocked: {reason}")
-                return
-            self.publish_offboard_request(True)
-            self.publish_mission_command("HOLD", True, "priming PX4 Offboard with zero/hold setpoints")
-            self.publish_state(f"priming offboard, age={age:.1f}/{self.offboard_prime_time_s:.1f}s")
-            if age >= self.offboard_prime_time_s:
-                self.transition(MissionState.TRACK_CENTER)
-            return
+        if handler(step):
+            self.advance()
 
-        if self.state == MissionState.TRACK_CENTER:
-            ok, reason = self.preflight_ok()
-            if not ok:
-                self.publish_state(f"track blocked: {reason}")
-                self.publish_mission_command("HOLD", True, f"track blocked: {reason}")
-                return
-            self.publish_offboard_request(True)
-            locked = self.target_is_fresh_locked()
-            self.publish_mission_command("TRACK_CENTER", True, "yaw toward YOLO target; no forward motion")
-            self.publish_state(f"track center yaw, locked={locked}, age={age:.1f}s")
-            if self.run_full_orbit_after_track_center and locked and self.target_centered():
-                self.transition(MissionState.APPROACH_TARGET)
-            elif self.track_center_timeout_s > 0.0 and age > self.track_center_timeout_s:
-                self.transition(MissionState.COMPLETE)
-            return
+    # ------------------------------------------------------------------
+    # Plan cursor management
+    # ------------------------------------------------------------------
+    def _start_plan(self) -> None:
+        self.step_index = 0
+        self.step_enter_time = time.time()
+        if self.plan.steps:
+            self.transition(MissionState[self.plan.steps[0].state_name])
+        self.log_event("plan_started", plan=self.plan.name, steps=[s.type for s in self.plan.steps])
 
-        # Later/full mission path. Disabled by default via run_full_orbit_after_track_center=false.
-        if self.state == MissionState.APPROACH_TARGET:
-            self.publish_offboard_request(True)
-            self.publish_mission_command("APPROACH_TARGET", True, "later step: approach using distance estimate")
-            dist_text = "none"
-            if self.last_target is not None and bool(getattr(self.last_target, "distance_valid", False)):
-                dist_text = f"{self.last_target.distance_m:.2f}m"
-            self.publish_state(f"approaching, distance={dist_text}, age={age:.1f}s")
-            if not self.target_is_fresh_locked():
-                self.transition(MissionState.TRACK_CENTER)
-            elif self.approach_done():
-                self.transition(MissionState.DO_ORBIT)
-            elif age > self.approach_timeout_s:
-                self.transition(MissionState.DO_ORBIT)
-            return
+    def advance(self) -> None:
+        prev = self.plan.steps[self.step_index].type if self.step_index < len(self.plan.steps) else "?"
+        self.step_index += 1
+        self.step_enter_time = time.time()
+        if self.step_index < len(self.plan.steps):
+            nxt = self.plan.steps[self.step_index]
+            self.get_logger().warning(f"Mission step '{prev}' done -> step {self.step_index} '{nxt.type}'")
+            self.log_event("step_advance", from_step=prev, to_index=self.step_index, to_type=nxt.type)
+        else:
+            self.log_event("plan_complete", last_step=prev)
 
-        if self.state == MissionState.DO_ORBIT:
-            self.publish_offboard_request(True)
-            if self.require_distance_for_orbit and not self.target_distance_ready():
-                self.publish_mission_command("TRACK_CENTER", True, "waiting for valid distance before orbit")
-                self.publish_state("orbit hold: distance not ready")
-                return
-            if self.require_target_centered_for_orbit and not self.target_centered():
-                self.publish_mission_command("TRACK_CENTER", True, "centering target before orbit")
-                self.publish_state("orbit hold: target not centered")
-                return
+    def step_age(self) -> float:
+        return time.time() - self.step_enter_time
 
-            if self.use_mavsdk_do_orbit:
-                self.send_action_once("do_orbit", "DO_ORBIT", "later step: MAV_CMD_DO_ORBIT around estimated ball center")
-                self.publish_mission_command("HOLD", True, "DO_ORBIT requested; PX4 owns orbit if accepted")
-            else:
-                self.publish_mission_command("ORBIT_TARGET", True, "visual-servo orbit fallback")
-            self.publish_state(f"orbiting/requested, age={age:.1f}/{self.orbit_timeout_s:.1f}s")
-            if age > self.orbit_timeout_s:
-                self.transition(MissionState.RETURN_TO_LAUNCH)
-            return
+    def _enter_complete(self) -> None:
+        self.transition(MissionState.COMPLETE)
+        self.publish_offboard_request(False)
+        self.publish_mission_command("IDLE", False, "mission complete")
+        self.publish_state("complete")
+        self.mission_active = False
 
-        if self.state == MissionState.RETURN_TO_LAUNCH:
-            self.publish_offboard_request(False)
-            self.send_action_once("rtl", "RETURN_TO_LAUNCH", "later step: return to launch")
-            self.publish_mission_command("HOLD", True, "RTL requested")
-            self.publish_state(f"returning, age={age:.1f}/{self.rtl_wait_s:.1f}s")
-            if age > self.rtl_wait_s:
-                self.transition(MissionState.LAND)
-            return
+    def _check_preflight_or_hold(self, label: str) -> bool:
+        """Shared preflight gate for takeoff/prime/track steps (matches the original
+        per-state checks). Publishes a blocked HOLD and returns False when not ready."""
+        ok, reason = self.preflight_ok()
+        if ok:
+            return True
+        self.publish_mission_command("HOLD", True, f"{label} blocked: {reason}")
+        self.publish_state(f"blocked: {reason}")
+        return False
 
-        if self.state == MissionState.LAND:
-            self.publish_offboard_request(False)
-            self.send_action_once("land", "LAND", "later step: land")
-            self.publish_mission_command("HOLD", True, "land requested")
-            self.publish_state(f"landing, age={age:.1f}/{self.land_wait_s:.1f}s")
-            if age > self.land_wait_s:
-                self.transition(MissionState.COMPLETE)
-            return
+    def _until_satisfied(self, step, default: str) -> bool:
+        until = step.until or default
+        if until == "airborne":
+            return self.is_airborne()
+        if until == "centered":
+            return self.target_centered()
+        if until == "locked":
+            return self.target_is_fresh_locked()
+        if until == "approach_done":
+            return self.approach_done()
+        return False  # "none" or unset -> never auto-advance on a condition
 
-        if self.state == MissionState.COMPLETE:
-            self.publish_offboard_request(False)
-            self.publish_mission_command("IDLE", False, "mission complete")
-            self.publish_state("complete")
-            self.mission_active = False
-            return
+    def _orbit_default_timeout(self, radius_m: float, speed_m_s: float, revolutions: float) -> float:
+        if speed_m_s > 0.0 and revolutions > 0.0 and radius_m > 0.0:
+            return (2.0 * math.pi * radius_m * revolutions) / speed_m_s + 5.0
+        return self.orbit_timeout_s
 
-        self.publish_mission_command("IDLE", False, f"unhandled state {self.state.value}")
-        self.publish_state(f"unhandled state {self.state.value}")
+    # ------------------------------------------------------------------
+    # Step handlers: each publishes its intent and returns True when the step is
+    # complete (the loop then advances). These are the original per-state bodies,
+    # parameterized by the plan step. Safety gates are unchanged.
+    # ------------------------------------------------------------------
+    def _step_takeoff(self, step) -> bool:
+        if not self._check_preflight_or_hold("takeoff"):
+            return False
+        self.publish_offboard_request(False)
+        # Takeoff if needed: skip when already airborne.
+        if self.is_airborne():
+            self.publish_mission_command("HOLD", True, "already airborne; skipping takeoff")
+            self.publish_state("already airborne; skipping takeoff")
+            return True
+        altitude_m = step.get_float("altitude_m", self.takeoff_altitude_m)
+        self.send_action_once(
+            "takeoff", "TAKEOFF", "smart mission takeoff before Offboard", takeoff_altitude_m=altitude_m
+        )
+        current_altitude = 0.0 if self.last_telemetry is None else float(self.last_telemetry.relative_altitude)
+        self.publish_mission_command(
+            "HOLD", True, f"takeoff action requested; waiting for altitude >= {self.airborne_altitude_m:.1f}m"
+        )
+        age = self.step_age()
+        self.publish_state(
+            f"takeoff requested, altitude={current_altitude:.2f}/{self.airborne_altitude_m:.2f}m, "
+            f"ready_for_offboard={self.is_airborne()}, age={age:.1f}/{self.takeoff_timeout_s:.1f}s"
+        )
+        if self.is_airborne():
+            return True
+        if age > self.takeoff_timeout_s:
+            # Stay on this step instead of yawing on the ground. Catches disabled action gates.
+            self.publish_state("takeoff timeout; still waiting for takeoff altitude")
+        return False
+
+    def _step_prime_offboard(self, step) -> bool:
+        if not self._check_preflight_or_hold("prime"):
+            return False
+        self.publish_offboard_request(True)
+        # Status must keep "priming PX4 Offboard" so control_node captures its prime anchor.
+        self.publish_mission_command("HOLD", True, "priming PX4 Offboard with zero/hold setpoints")
+        hold_s = step.get_float("hold_s", self.offboard_prime_time_s)
+        age = self.step_age()
+        self.publish_state(f"priming offboard, age={age:.1f}/{hold_s:.1f}s")
+        return age >= hold_s
+
+    def _step_track_center(self, step) -> bool:
+        if not self._check_preflight_or_hold("track"):
+            return False
+        self.publish_offboard_request(True)
+        locked = self.target_is_fresh_locked()
+        self.publish_mission_command("TRACK_CENTER", True, "yaw toward YOLO target; no forward motion")
+        age = self.step_age()
+        self.publish_state(f"track center yaw, locked={locked}, age={age:.1f}s")
+        if self._until_satisfied(step, default="none"):
+            return True
+        timeout = step.timeout_s if step.timeout_s is not None else self.track_center_timeout_s
+        return timeout > 0.0 and age > timeout
+
+    def _step_approach(self, step) -> bool:
+        self.publish_offboard_request(True)
+        self.publish_mission_command("APPROACH_TARGET", True, "approach using distance estimate")
+        dist_text = "none"
+        if self.last_target is not None and bool(getattr(self.last_target, "distance_valid", False)):
+            dist_text = f"{self.last_target.distance_m:.2f}m"
+        age = self.step_age()
+        self.publish_state(f"approaching, distance={dist_text}, age={age:.1f}s")
+        if self.approach_done():
+            return True
+        timeout = step.timeout_s if step.timeout_s is not None else self.approach_timeout_s
+        return age > timeout
+
+    def _step_orbit(self, step) -> bool:
+        self.publish_offboard_request(True)
+        if self.require_distance_for_orbit and not self.target_distance_ready():
+            self.publish_mission_command("TRACK_CENTER", True, "waiting for valid distance before orbit")
+            self.publish_state("orbit hold: distance not ready")
+            return False
+        if self.require_target_centered_for_orbit and not self.target_centered():
+            self.publish_mission_command("TRACK_CENTER", True, "centering target before orbit")
+            self.publish_state("orbit hold: target not centered")
+            return False
+
+        radius_m = step.get_float("radius_m", self.orbit_radius_m)
+        speed_m_s = step.get_float("speed_m_s", self.orbit_speed_m_s)
+        revolutions = step.get_float("revolutions", self.orbit_revolutions)
+
+        if self.use_mavsdk_do_orbit:
+            self.send_action_once(
+                "do_orbit", "DO_ORBIT", "MAV_CMD_DO_ORBIT around estimated ball center",
+                radius_m=radius_m, velocity_m_s=speed_m_s, orbit_revolutions=revolutions,
+            )
+            self.publish_mission_command("HOLD", True, "DO_ORBIT requested; PX4 owns orbit if accepted")
+        else:
+            self.publish_mission_command("ORBIT_TARGET", True, "visual-servo orbit fallback")
+
+        if step.timeout_s is not None:
+            timeout = step.timeout_s
+        elif "revolutions" in step.params:
+            timeout = self._orbit_default_timeout(radius_m, speed_m_s, revolutions)
+        else:
+            timeout = self.orbit_timeout_s
+        age = self.step_age()
+        self.publish_state(f"orbiting/requested, age={age:.1f}/{timeout:.1f}s")
+        return age > timeout
+
+    def _step_rtl(self, step) -> bool:
+        self.publish_offboard_request(False)
+        self.send_action_once("rtl", "RETURN_TO_LAUNCH", "return to launch")
+        self.publish_mission_command("HOLD", True, "RTL requested")
+        timeout = step.timeout_s if step.timeout_s is not None else self.rtl_wait_s
+        age = self.step_age()
+        self.publish_state(f"returning, age={age:.1f}/{timeout:.1f}s")
+        return age > timeout
+
+    def _step_land(self, step) -> bool:
+        self.publish_offboard_request(False)
+        self.send_action_once("land", "LAND", "land")
+        self.publish_mission_command("HOLD", True, "land requested")
+        timeout = step.timeout_s if step.timeout_s is not None else self.land_wait_s
+        age = self.step_age()
+        self.publish_state(f"landing, age={age:.1f}/{timeout:.1f}s")
+        return age > timeout
+
+    def _step_hold(self, step) -> bool:
+        self.publish_offboard_request(True)
+        status = str(step.params.get("status", "holding position"))
+        self.publish_mission_command("HOLD", True, status)
+        timeout = step.timeout_s if step.timeout_s is not None else 0.0
+        age = self.step_age()
+        self.publish_state(f"hold, age={age:.1f}/{timeout:.1f}s")
+        return timeout > 0.0 and age >= timeout
+
+    def _step_complete(self, step) -> bool:
+        self._enter_complete()
+        return False
 
 
 def main(args=None) -> None:

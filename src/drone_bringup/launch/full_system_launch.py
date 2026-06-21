@@ -13,7 +13,7 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, LogInfo
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, LogInfo
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -64,6 +64,13 @@ def generate_launch_description() -> LaunchDescription:
         description='SITL/dev only: allow mission TAKEOFF/LAND/RTL/HOLD actions through MAVSDK'
     )
 
+    mission_plan_file_arg = DeclareLaunchArgument(
+        'mission_plan_file',
+        default_value='',
+        description='Path to a YAML mission plan. Empty = built-in default plan (same as before). '
+                    'Example: src/drone_control/missions/orbit_red_ball.yaml'
+    )
+
 
     dashboard_arg = DeclareLaunchArgument(
         'dashboard',
@@ -75,6 +82,18 @@ def generate_launch_description() -> LaunchDescription:
         'dashboard_port',
         default_value='8080',
         description='HTTP port for the dashboard.'
+    )
+
+    record_bag_arg = DeclareLaunchArgument(
+        'record_bag',
+        default_value='false',
+        description='Record a rosbag of mission, telemetry, target, control, and MAVSDK topics.'
+    )
+
+    bag_output_arg = DeclareLaunchArgument(
+        'bag_output',
+        default_value='bags/drone_run',
+        description='ros2 bag output path. Use a fresh path for each run, e.g. bags/field_test_001.'
     )
 
     # Nodes
@@ -136,7 +155,7 @@ def generate_launch_description() -> LaunchDescription:
         package='drone_control',
         executable='mission_executor_node',
         name='mission_executor_node',
-        parameters=[config_file],
+        parameters=[config_file, {'mission_plan_file': LaunchConfiguration('mission_plan_file')}],
         output='screen',
         emulate_tty=True,
     )
@@ -177,15 +196,44 @@ def generate_launch_description() -> LaunchDescription:
         condition=IfCondition(LaunchConfiguration('dashboard')),
     )
 
+    bag_record = ExecuteProcess(
+        cmd=[
+            'ros2',
+            'bag',
+            'record',
+            '-o',
+            LaunchConfiguration('bag_output'),
+            '/drone/mission/state',
+            '/drone/mission/command',
+            '/drone/mission/request',
+            '/drone/autonomy/state',
+            '/drone/autonomy/request',
+            '/drone/autonomy/enabled',
+            '/drone/mavsdk/offboard_request',
+            '/drone/mavsdk/offboard_enable',
+            '/drone/mavsdk/action_command',
+            '/drone/mavsdk/command_status',
+            '/drone/telemetry',
+            '/drone/tracking/target_error',
+            '/drone/vision/detections',
+            '/drone/control/command',
+        ],
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('record_bag')),
+    )
+
     return LaunchDescription([
         headless_arg,
         dashboard_arg,
         dashboard_port_arg,
+        record_bag_arg,
+        bag_output_arg,
         camera_index_arg,
         model_path_arg,
         target_class_arg,
         connection_url_arg,
         allow_mavsdk_actions_arg,
+        mission_plan_file_arg,
         LogInfo(msg='=== DRONE VISION SYSTEM - FULL SYSTEM MODE ==='),
         LogInfo(msg='Real camera + YOLO + PX4 MAVSDK bridge active.'),
         LogInfo(msg=['Dashboard: http://<pi-ip>:', LaunchConfiguration('dashboard_port'), '/']),
@@ -193,6 +241,14 @@ def generate_launch_description() -> LaunchDescription:
         LogInfo(msg='*** mission_executor_node owns Start Mission: preflight -> takeoff if needed -> prime Offboard -> TRACK_CENTER yaw ***'),
         LogInfo(msg='*** dashboard main buttons: System Ready, Start Mission, Abort/Hold, Land; debug gates are in the drawer ***'),
         LogInfo(msg='*** SITL takeoff/land via Start Mission needs: allow_mavsdk_actions:=true. Leave false for normal hardware bench tests. ***'),
+        LogInfo(
+            msg=[
+                'Bag recording: record_bag=',
+                LaunchConfiguration('record_bag'),
+                ', bag_output=',
+                LaunchConfiguration('bag_output'),
+            ]
+        ),
         LogInfo(msg="Request autonomy: ros2 topic pub --once /drone/autonomy/request std_msgs/msg/Bool '{data: true}'"),
         LogInfo(msg="Disable autonomy: ros2 topic pub --once /drone/autonomy/request std_msgs/msg/Bool '{data: false}'"),
         camera,
@@ -205,4 +261,5 @@ def generate_launch_description() -> LaunchDescription:
         visualizer,
         health_monitor,
         dashboard,
+        bag_record,
     ])

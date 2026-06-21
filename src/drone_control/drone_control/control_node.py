@@ -175,6 +175,7 @@ class ControlNode(Node):
         self.hold_position_down = 0.0
         self.position_yaw_target_rad = 0.0
         self.last_yaw_update_time = 0.0
+        self.position_hold_anchor_source = "none"
 
         self.command_count = 0
         self.idle_command_count = 0
@@ -340,7 +341,8 @@ class ControlNode(Node):
             self.last_command_right = 0.0
             self.last_command_down = 0.0
             self.last_command_yaw = 0.0
-            self.reset_position_hold_anchor()
+            if old_enabled:
+                self.reset_position_hold_anchor()
 
             # Push a zero command immediately on disable instead of waiting for
             # the next control timer tick. During __init__, command_pub does not
@@ -370,6 +372,12 @@ class ControlNode(Node):
         self.last_mission_command_time = time.time()
         self.mission_command_count += 1
         self.last_mission_mode = str(msg.mode)
+
+        step_name = str(getattr(msg, "step_name", "")).strip().lower()
+        mode = str(msg.mode).strip().upper()
+        if not msg.active or mode == "IDLE" or step_name in ("0_preflight", "1_takeoff_if_needed"):
+            self.reset_position_hold_anchor()
+
         self.diagnostics.mark_received(
             self.mission_command_topic,
             summary=(
@@ -452,6 +460,7 @@ class ControlNode(Node):
         self.hold_position_down = 0.0
         self.position_yaw_target_rad = 0.0
         self.last_yaw_update_time = 0.0
+        self.position_hold_anchor_source = "none"
 
     def local_position_ready(self) -> bool:
         if self.last_telemetry is None:
@@ -463,7 +472,7 @@ class ControlNode(Node):
             getattr(self.last_telemetry, "yaw", float("nan")),
         )
 
-    def capture_position_hold_anchor(self, current_time: float) -> bool:
+    def capture_position_hold_anchor(self, current_time: float, source: str = "control") -> bool:
         if self.position_hold_valid:
             return True
         if not self.local_position_ready():
@@ -476,15 +485,31 @@ class ControlNode(Node):
         self.position_yaw_target_rad = self.wrap_pi(float(telemetry.yaw))
         self.last_yaw_update_time = current_time
         self.position_hold_valid = True
+        self.position_hold_anchor_source = str(source)
 
         self.get_logger().warning(
-            "Captured POSITION hold anchor | "
+            f"Captured POSITION hold anchor ({self.position_hold_anchor_source}) | "
             f"N={self.hold_position_north:.2f}m, "
             f"E={self.hold_position_east:.2f}m, "
             f"D={self.hold_position_down:.2f}m, "
             f"yaw={self.yaw_rad_to_deg_0_360(self.position_yaw_target_rad):.1f}deg"
         )
         return True
+
+    @staticmethod
+    def mission_is_prime_offboard_hold(mission: Optional[MissionCommand]) -> bool:
+        if mission is None or not mission.active:
+            return False
+        mode = str(mission.mode).strip().upper()
+        step_name = str(getattr(mission, "step_name", "")).strip().lower()
+        status = str(getattr(mission, "status", "")).strip().lower()
+        return (
+            mode == "HOLD"
+            and (
+                step_name == "2_prime_offboard"
+                or "priming px4 offboard" in status
+            )
+        )
 
     def update_yaw_target(self, yaw_rate_rad_s: float, current_time: float) -> float:
         if self.last_yaw_update_time <= 0.0:
@@ -706,6 +731,11 @@ class ControlNode(Node):
         mission_mode = "TRACK_CENTER" if mission is None else str(mission.mode).strip().upper()
 
         if not self.autonomy_enabled:
+            if self.mission_is_prime_offboard_hold(mission) and not self.position_hold_valid:
+                safe, _ = self.check_safety(current_time)
+                if safe:
+                    self.capture_position_hold_anchor(current_time, source="mission_prime_offboard")
+
             source_error_x = 0.0
             source_error_y = 0.0
             if self.last_target_error is not None:
@@ -723,7 +753,7 @@ class ControlNode(Node):
             self.publish_idle(reason)
             return
 
-        if not self.capture_position_hold_anchor(current_time):
+        if not self.capture_position_hold_anchor(current_time, source="tracking_start"):
             self.publish_idle(STATUS_BLOCKED_NO_LOCAL_POSITION)
             return
 
@@ -802,6 +832,7 @@ class ControlNode(Node):
             f"target_msgs={self.target_error_count}, telemetry_msgs={self.telemetry_count}, "
             f"autonomy_msgs={self.autonomy_enable_count}, mission_msgs={self.mission_command_count}, "
             f"mission_mode={self.last_mission_mode}, "
+            f"anchor_valid={self.position_hold_valid}, anchor_source={self.position_hold_anchor_source}, "
             f"target_age={self.diagnostics.format_age(self.target_error_topic)}, "
             f"telemetry_age={self.diagnostics.format_age(self.telemetry_topic)}, "
             f"forward={self.last_command_forward:.3f}, "

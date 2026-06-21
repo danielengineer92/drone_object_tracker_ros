@@ -144,7 +144,8 @@ class TelemetryNode(Node):
         self._last_status_publish_time: float = 0.0
         self._last_log_times: dict[str, float] = {}
         self._action_command_count: int = 0
-        self._last_handled_action_id: int = 0
+        self._handled_action_keys: set[tuple[int, str, int, int, str]] = set()
+        self._handled_action_key_order: list[tuple[int, str, int, int, str]] = []
         self._action_in_progress: bool = False
         self._prime_hold_position: Optional[tuple[float, float, float, float]] = None
 
@@ -514,19 +515,21 @@ class TelemetryNode(Node):
 
             if command is None:
                 continue
-            if int(command.command_id) <= self._last_handled_action_id:
+
+            action_key = self._action_dedupe_key(command)
+            if action_key in self._handled_action_keys:
                 continue
 
             command_age = time.monotonic() - command_time
             if command_age > self._action_command_timeout:
-                self._last_handled_action_id = int(command.command_id)
+                self._mark_action_handled(action_key)
                 self._publish_command_status(
                     f'{ACTION_IGNORED}: id={command.command_id}, stale={command_age:.2f}s',
                     force=True,
                 )
                 continue
 
-            self._last_handled_action_id = int(command.command_id)
+            self._mark_action_handled(action_key)
 
             if not bool(command.execute):
                 self._publish_command_status(f'{ACTION_IGNORED}: id={command.command_id}, execute=false', force=True)
@@ -566,6 +569,30 @@ class TelemetryNode(Node):
                 self._log_throttled('action_failed', 'warning', f'MAVSDK action failed: {exc}', 1.0)
             finally:
                 self._action_in_progress = False
+
+    @staticmethod
+    def _action_dedupe_key(command: MavsdkActionCommand) -> tuple[int, str, int, int, str]:
+        stamp = getattr(command, 'stamp', None)
+        stamp_sec = int(getattr(stamp, 'sec', 0))
+        stamp_nanosec = int(getattr(stamp, 'nanosec', 0))
+        return (
+            int(command.command_id),
+            str(command.action).strip().upper(),
+            stamp_sec,
+            stamp_nanosec,
+            str(command.note),
+        )
+
+    def _mark_action_handled(self, action_key: tuple[int, str, int, int, str]) -> None:
+        self._handled_action_keys.add(action_key)
+        self._handled_action_key_order.append(action_key)
+
+        # Keep the dedupe cache bounded. It only needs to suppress repeats of
+        # recently received ROS messages, not remember every action forever.
+        max_keys = 128
+        while len(self._handled_action_key_order) > max_keys:
+            old_key = self._handled_action_key_order.pop(0)
+            self._handled_action_keys.discard(old_key)
 
     async def _execute_action_command(self, drone, command: MavsdkActionCommand) -> None:
         action = str(command.action).strip().upper()
@@ -970,7 +997,7 @@ class TelemetryNode(Node):
             decision['reason'] = f'{BRIDGE_COMMAND_STALE} ({command_age:.2f}s)'
             return decision
 
-        if not command.executed or command.execution_status != STATUS_SENT:
+        if not command.executed:
             decision['reason'] = (
                 f'{BRIDGE_COMMAND_NOT_APPROVED}: executed={command.executed}, '
                 f'status={command.execution_status}'
@@ -1007,6 +1034,13 @@ class TelemetryNode(Node):
                     'yaw_rate_rad_s': yaw_rate_rad_s,
                     'yawspeed_deg_s': math.degrees(yaw_rate_rad_s),
                 }
+            )
+            return decision
+
+        if command.execution_status != STATUS_SENT:
+            decision['reason'] = (
+                f'{BRIDGE_COMMAND_NOT_APPROVED}: executed={command.executed}, '
+                f'status={command.execution_status}'
             )
             return decision
 

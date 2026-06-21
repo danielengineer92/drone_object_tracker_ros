@@ -19,7 +19,10 @@ float32 position_east
 float32 position_down
 float32 yaw_deg
 
-# Whether the control node approved this command for the MAVSDK bridge
+# Whether the control node approved this command for the MAVSDK bridge.
+# For POSITION hold commands, executed=true is the approval bit and
+# execution_status may describe the hold reason, such as MISSION_HOLD or
+# NO_TARGET_DATA. Legacy VELOCITY commands should use SENT when approved.
 bool executed
 string execution_status  # SENT, BLOCKED_*, IDLE, SIMULATED
 

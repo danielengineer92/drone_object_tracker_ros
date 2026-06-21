@@ -144,12 +144,18 @@ mission_executor_node:
     require_connected_for_mission: true
     require_armed_for_mission: true
     telemetry_timeout_s: 2.0
-    takeoff_altitude_m: 2.0
-    airborne_altitude_m: 0.75
+    takeoff_altitude_m: 3.0
+    airborne_altitude_m: 2.7
     takeoff_timeout_s: 20.0
     offboard_prime_time_s: 1.5
     track_center_timeout_s: 0.0
     run_full_orbit_after_track_center: false
+
+    # Optional external YAML mission plan. Empty = built-in default plan (unchanged
+    # behavior). Set a path (or pass mission_plan_file:= at launch) to script a custom
+    # sequence, e.g. src/drone_control/missions/orbit_red_ball.yaml. See the missions/
+    # folder for examples and the "Programming Missions" README section.
+    mission_plan_file: ""
 
     # Later orbit/return mission knobs. Disabled until run_full_orbit_after_track_center=true.
     target_timeout_s: 2.0
@@ -168,6 +174,10 @@ mission_executor_node:
     require_distance_for_orbit: true
     require_target_centered_for_orbit: true
     center_error_threshold: 0.15
+
+    # One JSONL event file per mission executor launch. Good for quick field-debug review.
+    event_log_enabled: true
+    event_log_directory: "~/drone_mission_logs"
 
 control_node:
   ros__parameters:

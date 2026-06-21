@@ -12,12 +12,13 @@ It can also publish operator requests through:
     POST /api/autonomy_request {"enabled": true|false}
     POST /api/mavsdk_request {"enabled": true|false}
     POST /api/mission_request {"enabled": true|false}
-    POST /api/abort_hold {"enabled": true}
-    POST /api/land {"enabled": true}
+    POST /api/abort_hold {"confirm": true}
+    POST /api/land {"confirm": true}
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import threading
 import time
@@ -64,36 +65,11 @@ DASHBOARD_HTML = r"""<!doctype html>
       min-height: 100vh;
       color: var(--text);
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background:
-        radial-gradient(circle at 20% 10%, rgba(55, 232, 255, 0.18), transparent 32%),
-        radial-gradient(circle at 80% 0%, rgba(183, 148, 244, 0.16), transparent 30%),
-        radial-gradient(circle at 50% 100%, rgba(80, 250, 123, 0.10), transparent 34%),
-        linear-gradient(135deg, #03050c 0%, #07101e 52%, #0c1020 100%);
+      background: #06101e;
       overflow-x: hidden;
     }
 
-    body::before {
-      content: "";
-      position: fixed;
-      inset: 0;
-      pointer-events: none;
-      opacity: 0.34;
-      background-image:
-        linear-gradient(rgba(55, 232, 255, .08) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(55, 232, 255, .08) 1px, transparent 1px);
-      background-size: 48px 48px;
-      mask-image: radial-gradient(circle at center, black, transparent 75%);
-    }
-
-    body::after {
-      content: "";
-      position: fixed;
-      inset: 0;
-      pointer-events: none;
-      background: repeating-linear-gradient(0deg, rgba(255,255,255,0.025) 0, rgba(255,255,255,0.025) 1px, transparent 1px, transparent 4px);
-      mix-blend-mode: soft-light;
-      opacity: 0.14;
-    }
+    body::before, body::after { display: none; }
 
     .shell { width: min(1680px, 100%); margin: 0 auto; padding: 20px; position: relative; z-index: 1; }
 
@@ -109,22 +85,13 @@ DASHBOARD_HTML = r"""<!doctype html>
       border: 1px solid rgba(55, 232, 255, .18);
       border-radius: 22px;
       padding: 20px 22px;
-      background: linear-gradient(135deg, rgba(10, 18, 34, .86), rgba(17, 28, 55, .62));
-      box-shadow: 0 20px 60px rgba(0,0,0,.38), inset 0 1px 0 rgba(255,255,255,.05);
+      background: #0a1528;
+      box-shadow: none;
       position: relative;
       overflow: hidden;
     }
 
-    .titleBlock::before {
-      content: "";
-      position: absolute;
-      inset: 0;
-      background: linear-gradient(120deg, transparent, rgba(55,232,255,.10), transparent);
-      transform: translateX(-70%);
-      /* Shimmer disabled: it was surprisingly expensive in Firefox/Windows. */
-    }
-
-    @keyframes shimmer { to { transform: translateX(70%); } }
+    .titleBlock::before { display: none; }
 
     .eyebrow { color: var(--cyan); letter-spacing: .22em; font-size: 12px; font-weight: 800; text-transform: uppercase; }
     h1 { margin: 7px 0 6px; font-size: clamp(30px, 4vw, 56px); line-height: .92; letter-spacing: -.06em; }
@@ -137,7 +104,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       border-radius: 16px;
       border: 1px solid rgba(255,255,255,.09);
       background: rgba(7, 12, 24, .70);
-      box-shadow: 0 12px 28px rgba(0,0,0,.28);
+      box-shadow: none;
     }
     .pill .k { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .16em; }
     .pill .v { margin-top: 5px; font-size: 17px; font-weight: 900; }
@@ -150,21 +117,12 @@ DASHBOARD_HTML = r"""<!doctype html>
       border-radius: 22px;
       padding: 18px;
       background: var(--panel);
-      box-shadow: 0 12px 30px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.045);
-      /* backdrop-filter blur was the biggest browser GPU hit; keep panels flat and fast. */
+      box-shadow: none;
       position: relative;
       overflow: hidden;
     }
 
-    .card::before {
-      content: "";
-      position: absolute;
-      inset: 0;
-      pointer-events: none;
-      border-radius: inherit;
-      background: linear-gradient(135deg, rgba(55,232,255,.10), transparent 35%, rgba(183,148,244,.08));
-      opacity: .65;
-    }
+    .card::before { display: none; }
 
     .card > * { position: relative; z-index: 1; }
 
@@ -182,7 +140,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     .statusLight { display: inline-flex; align-items: center; gap: 7px; }
-    .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); box-shadow: 0 0 12px currentColor; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: currentColor; }
     .ok { color: var(--green); }
     .warn { color: var(--yellow); }
     .bad { color: var(--red); }
@@ -216,13 +174,12 @@ DASHBOARD_HTML = r"""<!doctype html>
       font-weight: 950;
       letter-spacing: .04em;
       text-transform: uppercase;
-      box-shadow: 0 12px 28px rgba(0,0,0,.26);
-      transition: transform .12s ease, filter .12s ease;
+      box-shadow: none;
     }
-    button:hover { transform: translateY(-2px); filter: brightness(1.08); }
-    .enable { background: linear-gradient(135deg, var(--green), var(--cyan)); }
-    .disable { background: linear-gradient(135deg, var(--red), var(--yellow)); }
-    .hold { background: linear-gradient(135deg, var(--yellow), var(--cyan)); }
+    button:hover { filter: brightness(1.08); }
+    .enable { background: var(--green); }
+    .disable { background: var(--red); color: white; }
+    .hold { background: var(--yellow); }
     .pilotButtons button { font-size: 14px; min-width: 150px; }
     .debugDrawer {
       margin-top: 12px;
@@ -246,10 +203,11 @@ DASHBOARD_HTML = r"""<!doctype html>
       height: 190px;
       border-radius: 50%;
       margin: auto;
-      background: conic-gradient(var(--green) var(--battery), rgba(255,255,255,.08) 0);
+      background: #07101e;
       display: grid;
       place-items: center;
-      box-shadow: 0 0 34px rgba(80,250,123,.13);
+      border: 10px solid rgba(80,250,123,.45);
+      position: relative;
     }
     .batteryRing::before {
       content: "";
@@ -268,9 +226,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       height: 460px;
       border-radius: 24px;
       overflow: hidden;
-      background:
-        radial-gradient(circle at center, rgba(55,232,255,.14), transparent 38%),
-        linear-gradient(160deg, rgba(9, 16, 32, .88), rgba(1, 4, 12, .92));
+      background: #07101e;
       border: 1px solid rgba(55,232,255,.22);
       position: relative;
     }
@@ -278,11 +234,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     .hudGrid {
       position: absolute;
       inset: 0;
-      background-image:
-        linear-gradient(rgba(55,232,255,.13) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(55,232,255,.13) 1px, transparent 1px);
-      background-size: 34px 34px;
-      opacity: .36;
+      display: none;
     }
 
     .hudCrosshair {
@@ -293,7 +245,6 @@ DASHBOARD_HTML = r"""<!doctype html>
       content: "";
       position: absolute;
       background: rgba(55,232,255,.52);
-      box-shadow: 0 0 20px rgba(55,232,255,.36);
     }
     .hudCrosshair::before { width: 1px; height: 72%; left: 50%; top: 14%; }
     .hudCrosshair::after { height: 1px; width: 72%; top: 50%; left: 14%; }
@@ -305,9 +256,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       width: 162px;
       height: 118px;
       border: 2px solid var(--green);
-      box-shadow: 0 0 28px rgba(80,250,123,.28), inset 0 0 26px rgba(80,250,123,.10);
       transform: translate(-50%, -50%);
-      transition: left .25s ease, top .25s ease, opacity .25s ease;
+      will-change: transform;
     }
     .targetBox::before, .targetBox::after {
       content: "";
@@ -327,7 +277,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       font-weight: 950;
       letter-spacing: .06em;
     }
-    .lost .targetBox { border-color: var(--red); box-shadow: 0 0 28px rgba(255,95,117,.28); opacity: .62; }
+    .lost .targetBox { border-color: var(--red); opacity: .62; }
     .lost .targetTag { background: var(--red); color: white; }
 
     .errorVector {
@@ -338,8 +288,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       height: 2px;
       transform-origin: left center;
       border-top: 2px solid var(--cyan);
-      box-shadow: 0 0 20px rgba(55,232,255,.7);
-      transition: width .25s ease, transform .25s ease;
+      will-change: transform, width;
     }
     .errorVector::after {
       content: "";
@@ -390,6 +339,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     .trace canvas { height: 220px; }
 
     .gates { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+    .preflightList { display: grid; gap: 9px; }
     .gate {
       display: flex;
       justify-content: space-between;
@@ -408,7 +358,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     .bars { display: grid; gap: 12px; }
     .barRow { display: grid; grid-template-columns: 74px 1fr 80px; gap: 10px; align-items: center; font-size: 13px; color: #cfe6f8; }
     .barTrack { height: 10px; border-radius: 999px; background: rgba(255,255,255,.07); overflow: hidden; position: relative; }
-    .barFill { height: 100%; width: 50%; background: linear-gradient(90deg, var(--violet), var(--cyan)); border-radius: 999px; transform-origin: left center; transition: width .22s ease; }
+    .barFill { height: 100%; width: 50%; background: var(--cyan); border-radius: 999px; transform-origin: left center; }
     .barValue { text-align: right; color: var(--muted); }
 
     pre {
@@ -537,6 +487,19 @@ DASHBOARD_HTML = r"""<!doctype html>
         </section>
 
         <section class="card">
+          <div class="cardTitle"><span>Preflight</span><span id="preflightSummary" class="statusLight warn"><span class="dot"></span>0/7</span></div>
+          <div class="preflightList">
+            <div class="gate"><span>Telemetry Fresh</span><span id="preflightTelemetry" class="state bad">NO</span></div>
+            <div class="gate"><span>PX4 Link</span><span id="preflightLink" class="state bad">NO</span></div>
+            <div class="gate"><span>Armed</span><span id="preflightArmed" class="state bad">NO</span></div>
+            <div class="gate"><span>Battery</span><span id="preflightBattery" class="state warn">UNKNOWN</span></div>
+            <div class="gate"><span>Local Position</span><span id="preflightLocal" class="state bad">NO</span></div>
+            <div class="gate"><span>Vision Fresh</span><span id="preflightVision" class="state bad">NO</span></div>
+            <div class="gate"><span>Target Lock</span><span id="preflightTarget" class="state warn">LOST</span></div>
+          </div>
+        </section>
+
+        <section class="card">
           <div class="cardTitle"><span>Safety Gate Matrix</span><span id="gateSummary" class="warn">BLOCKED</span></div>
           <div class="gates">
             <div class="gate"><span>PX4 Link</span><span id="gateLink" class="state bad">NO</span></div>
@@ -563,41 +526,71 @@ DASHBOARD_HTML = r"""<!doctype html>
         </section>
 
         <section class="card">
-          <div class="cardTitle"><span>Raw Snapshot Console</span><span>/api/status</span></div>
-          <pre id="raw">--</pre>
+          <details id="rawPanel" class="debugDrawer">
+            <summary>Raw Snapshot Console /api/status</summary>
+            <pre id="raw">--</pre>
+          </details>
         </section>
       </div>
     </main>
   </div>
 
   <script>
-    const maxPoints = 60;
-    const refreshPeriodMs = 1000;
+    const maxPoints = 30;
+    const refreshPeriodMs = 2000;
+    const tracePeriodMs = 5000;
+    const rawUpdatePeriodMs = 10000;
     let lastRawUpdateMs = 0;
+    let lastTraceDrawMs = 0;
+    let lastInstrumentSignature = '';
+    let canvasDirty = true;
+    let refreshInFlight = false;
+    const nodeCache = {};
     const history = { battery: [], altitude: [], yaw: [] };
     const deg = (rad) => Number.isFinite(rad) ? rad * 180 / Math.PI : 0;
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
     const fmt = (v, n = 2) => Number.isFinite(v) ? Number(v).toFixed(n) : '--';
 
+    function node(id) {
+      return nodeCache[id] || (nodeCache[id] = document.getElementById(id));
+    }
     function statusClass(ok, warn = false) { return ok ? 'ok' : (warn ? 'warn' : 'bad'); }
     function setText(id, text, cls) {
-      const el = document.getElementById(id);
+      const el = node(id);
       if (!el) return;
-      el.textContent = text;
-      if (cls) el.className = el.className.split(' ')[0] + ' ' + cls;
+      const nextText = String(text);
+      if (el.textContent !== nextText) el.textContent = nextText;
+      if (cls) {
+        const base = el.dataset.baseClass || (el.dataset.baseClass = el.className.split(' ')[0] || '');
+        const nextClass = (base + ' ' + cls).trim();
+        if (el.className !== nextClass) el.className = nextClass;
+      }
+    }
+    function setBadge(id, label, cls) {
+      const el = node(id);
+      if (!el) return;
+      const nextClass = 'statusLight ' + cls;
+      if (el.className !== nextClass) el.className = nextClass;
+      const nextLabel = String(label);
+      if (el.dataset.label !== nextLabel) {
+        el.dataset.label = nextLabel;
+        el.innerHTML = '<span class="dot"></span>' + nextLabel;
+      }
     }
     function setGate(id, ok, textOk = 'YES', textBad = 'NO', warn = false) {
-      const el = document.getElementById(id);
+      const el = node(id);
       if (!el) return;
-      el.textContent = ok ? textOk : textBad;
-      el.className = 'state ' + statusClass(ok, warn && !ok);
+      const nextText = ok ? textOk : textBad;
+      const nextClass = 'state ' + statusClass(ok, warn && !ok);
+      if (el.textContent !== nextText) el.textContent = nextText;
+      if (el.className !== nextClass) el.className = nextClass;
     }
     function pushHist(key, value) {
       history[key].push(value);
       if (history[key].length > maxPoints) history[key].shift();
     }
     function resizeCanvas(canvas) {
-      const dpr = Math.min(window.devicePixelRatio || 1, 1.25);
+      const dpr = 1;
       const rect = canvas.getBoundingClientRect();
       const w = Math.max(1, Math.floor(rect.width * dpr));
       const h = Math.max(1, Math.floor(rect.height * dpr));
@@ -611,11 +604,9 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function drawTrace() {
-      const canvas = document.getElementById('traceCanvas');
+      const canvas = node('traceCanvas');
       const { ctx, w, h } = resizeCanvas(canvas);
       ctx.clearRect(0, 0, w, h);
-      ctx.fillStyle = 'rgba(255,255,255,.025)';
-      ctx.fillRect(0, 0, w, h);
       ctx.strokeStyle = 'rgba(99,179,237,.14)';
       ctx.lineWidth = 1;
       for (let i = 0; i <= 6; i++) {
@@ -623,7 +614,8 @@ DASHBOARD_HTML = r"""<!doctype html>
         ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
       }
       drawSeries(ctx, history.battery, w, h, 0, 100, '#50fa7b', 'BAT %', 16);
-      const altMax = Math.max(3, ...history.altitude.map(v => Math.abs(v))) || 3;
+      let altMax = 3;
+      for (const value of history.altitude) altMax = Math.max(altMax, Math.abs(value));
       drawSeries(ctx, history.altitude, w, h, -altMax, altMax, '#37e8ff', 'ALT m', 36);
       drawSeries(ctx, history.yaw, w, h, -180, 180, '#b794f4', 'YAW °', 56);
     }
@@ -647,7 +639,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function drawHorizon(rollDeg, pitchDeg) {
-      const canvas = document.getElementById('horizonCanvas');
+      const canvas = node('horizonCanvas');
       const { ctx, w, h } = resizeCanvas(canvas);
       ctx.clearRect(0, 0, w, h);
       ctx.save();
@@ -680,7 +672,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function drawCompass(yawDeg) {
-      const canvas = document.getElementById('compassCanvas');
+      const canvas = node('compassCanvas');
       const { ctx, w, h } = resizeCanvas(canvas);
       ctx.clearRect(0, 0, w, h);
       const cx = w / 2, cy = h / 2, r = Math.min(w, h) * .38;
@@ -720,40 +712,72 @@ DASHBOARD_HTML = r"""<!doctype html>
       rows.forEach(([_, value, barId, valId, maxAbs]) => {
         const v = Number(value) || 0;
         const pct = 50 + clamp(v / maxAbs, -1, 1) * 50;
-        document.getElementById(barId).style.width = pct + '%';
-        document.getElementById(valId).textContent = fmt(v, 3);
+        const bar = node(barId);
+        const val = node(valId);
+        const width = pct.toFixed(1) + '%';
+        const text = fmt(v, 3);
+        if (bar && bar.style.width !== width) bar.style.width = width;
+        if (val && val.textContent !== text) val.textContent = text;
       });
     }
 
     function updateHud(s) {
-      const hud = document.getElementById('hud');
-      const errX = Number(s.target.error_x) || 0;
-      const errY = Number(s.target.error_y) || 0;
-      const visible = !!s.target.target_visible;
+      const hud = node('hud');
+      const target = s.target || {};
+      const errX = Number(target.error_x) || 0;
+      const errY = Number(target.error_y) || 0;
+      const visible = !!target.target_visible;
       hud.classList.toggle('lost', !visible);
-      const left = 50 - clamp(errX, -1, 1) * 33;
-      const top = 50 + clamp(errY, -1, 1) * 28;
-      const box = document.getElementById('targetBox');
-      box.style.left = left + '%';
-      box.style.top = top + '%';
-      document.getElementById('targetTag').textContent = visible ? (s.target.tracking_state || 'LOCKED') : 'TARGET LOST';
-      const dx = (left - 50), dy = (top - 50);
-      const len = Math.sqrt(dx*dx + dy*dy) * 4.5;
-      const angle = Math.atan2(dy, dx) * 180 / Math.PI;
-      const vec = document.getElementById('errorVector');
-      vec.style.width = len + 'px';
-      vec.style.transform = `rotate(${angle}deg)`;
-      setText('hudClass', s.target.target_class || '--');
-      setText('hudConfidence', fmt(Number(s.target.confidence), 2));
-      setText('hudDetections', String(s.detections.count ?? 0));
-      setText('hudDistance', s.target.distance_valid ? fmt(Number(s.target.distance_m), 2) + ' m' : '--');
+      const offsetX = -clamp(errX, -1, 1) * hud.clientWidth * 0.33;
+      const offsetY = clamp(errY, -1, 1) * hud.clientHeight * 0.28;
+      const box = node('targetBox');
+      const boxTransform = `translate(-50%, -50%) translate(${offsetX.toFixed(1)}px, ${offsetY.toFixed(1)}px)`;
+      if (box.style.transform !== boxTransform) box.style.transform = boxTransform;
+      setText('targetTag', visible ? (target.tracking_state || 'LOCKED') : 'TARGET LOST');
+      const len = Math.min(260, Math.sqrt(offsetX*offsetX + offsetY*offsetY));
+      const angle = Math.atan2(offsetY, offsetX) * 180 / Math.PI;
+      const vec = node('errorVector');
+      const vecWidth = len.toFixed(1) + 'px';
+      const vecTransform = `rotate(${angle.toFixed(1)}deg)`;
+      if (vec.style.width !== vecWidth) vec.style.width = vecWidth;
+      if (vec.style.transform !== vecTransform) vec.style.transform = vecTransform;
+      setText('hudClass', target.target_class || '--');
+      setText('hudConfidence', fmt(Number(target.confidence), 2));
+      setText('hudDetections', String((s.detections || {}).count ?? 0));
+      setText('hudDistance', target.distance_valid ? fmt(Number(target.distance_m), 2) + ' m' : '--');
       setText('hudErrX', fmt(errX, 3));
       setText('hudErrY', fmt(errY, 3));
-      setText('hudAge', s.target.age_s == null ? '--' : s.target.age_s + 's');
+      setText('hudAge', target.age_s == null ? '--' : target.age_s + 's');
       const targetCls = statusClass(visible, true);
-      const badge = document.getElementById('targetBadge');
-      badge.className = 'statusLight ' + targetCls;
-      badge.innerHTML = '<span class="dot"></span>' + (visible ? 'LOCKED' : 'SEARCHING');
+      setBadge('targetBadge', visible ? 'LOCKED' : 'SEARCHING', targetCls);
+    }
+
+    function updatePreflight(s, t, target) {
+      const detections = s.detections || {};
+      const telemetryAge = Number(t.age_s);
+      const visionAge = Number(detections.age_s);
+      const targetAge = Number(target.age_s);
+      const battery = Number(t.battery_percent);
+      const telemetryFresh = Number.isFinite(telemetryAge) && telemetryAge <= 2.5;
+      const visionFresh = Number.isFinite(visionAge) && visionAge <= 2.5;
+      const targetFresh = Number.isFinite(targetAge) && targetAge <= 2.5;
+      const batteryKnown = Number.isFinite(battery) && battery > 0;
+      const batteryOk = batteryKnown && battery >= 25;
+      const items = [
+        ['preflightTelemetry', telemetryFresh, telemetryFresh ? 'OK' : (Number.isFinite(telemetryAge) ? telemetryAge.toFixed(1) + 's' : 'NO'), false],
+        ['preflightLink', !!t.connected, t.connected ? 'YES' : 'NO', false],
+        ['preflightArmed', !!t.armed, t.armed ? 'YES' : 'NO', false],
+        ['preflightBattery', batteryOk, batteryKnown ? Math.round(battery) + '%' : 'UNKNOWN', true],
+        ['preflightLocal', !!t.local_position_valid, t.local_position_valid ? 'VALID' : 'NO', false],
+        ['preflightVision', visionFresh, visionFresh ? 'OK' : (Number.isFinite(visionAge) ? visionAge.toFixed(1) + 's' : 'NO'), true],
+        ['preflightTarget', !!target.target_visible && targetFresh, target.target_visible ? 'LOCKED' : 'LOST', true],
+      ];
+      let passed = 0;
+      for (const [id, ok, label, warn] of items) {
+        if (ok) passed += 1;
+        setText(id, label, statusClass(ok, warn && !ok));
+      }
+      setBadge('preflightSummary', passed + '/' + items.length, passed === items.length ? 'ok' : (passed >= 5 ? 'warn' : 'bad'));
     }
 
     async function postJson(path, payload) {
@@ -769,16 +793,19 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     async function systemReady() { await setAutonomy(true); }
     async function startSmartMission() { await setMission(true); }
-    async function abortHold() { await postJson('/api/abort_hold', { enabled: true }); }
-    async function landNow() { await postJson('/api/land', { enabled: true }); }
+    async function abortHold() { await postJson('/api/abort_hold', { confirm: true }); }
+    async function landNow() { await postJson('/api/land', { confirm: true }); }
 
     async function refresh() {
-      if (document.hidden) return;
+      if (document.hidden || refreshInFlight) return;
+      refreshInFlight = true;
       try {
         const r = await fetch('/api/status', { cache: 'no-store' });
         const s = await r.json();
         const t = s.telemetry || {};
         const c = s.control || {};
+        const target = s.target || {};
+        const nowMs = performance.now();
         const mission = (s.mission_state && s.mission_state !== 'UNKNOWN') ? s.mission_state : (s.autonomy_state || 'UNKNOWN');
         const missionParts = String(mission).split(':');
         const missionName = missionParts[0].trim();
@@ -786,9 +813,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         const waiting = missionName.includes('PREFLIGHT') || missionName.includes('TARGET_LOST') || missionName.includes('REQUESTED');
         setText('mission', missionName, statusClass(tracking, waiting));
         setText('missionReason', missionParts.slice(1).join(':').trim() || s.state_reason || '--');
-        const missionBadge = document.getElementById('missionBadge');
-        missionBadge.className = 'statusLight ' + statusClass(tracking, waiting);
-        missionBadge.innerHTML = '<span class="dot"></span>' + (tracking ? 'LIVE' : waiting ? 'STANDBY' : 'BLOCKED');
+        setBadge('missionBadge', tracking ? 'LIVE' : waiting ? 'STANDBY' : 'BLOCKED', statusClass(tracking, waiting));
 
         setText('pillLink', t.connected ? 'CONNECTED' : 'NO LINK', statusClass(t.connected));
         setText('pillArmed', t.armed ? 'TRUE' : 'FALSE', statusClass(t.armed));
@@ -796,10 +821,8 @@ DASHBOARD_HTML = r"""<!doctype html>
         setText('pillUptime', fmt(Number(s.uptime_s), 1) + 's', 'cyan');
 
         const battery = clamp(Number(t.battery_percent) || 0, 0, 100);
-        document.documentElement.style.setProperty('--battery', battery + '%');
         setText('batteryBig', fmt(battery, 0) + '%');
         setText('batteryVolt', fmt(Number(t.battery_voltage), 2) + ' V');
-        document.querySelector('.batteryRing').style.background = `conic-gradient(${battery < 25 ? 'var(--red)' : battery < 45 ? 'var(--yellow)' : 'var(--green)'} ${battery}%, rgba(255,255,255,.08) 0)`;
 
         updateHud(s);
 
@@ -818,42 +841,53 @@ DASHBOARD_HTML = r"""<!doctype html>
 
         setText('attitudeText', `roll ${fmt(rollDeg,1)}° · pitch ${fmt(pitchDeg,1)}°`, 'cyan');
         setText('compassText', `yaw ${fmt(yawDeg,1)}°`, 'cyan');
-        drawHorizon(rollDeg, pitchDeg);
-        drawCompass(yawDeg);
+
+        updatePreflight(s, t, target);
 
         pushHist('battery', battery);
         pushHist('altitude', Number(t.relative_altitude_m) || 0);
         pushHist('yaw', yawDeg);
-        drawTrace();
+        const instrumentSignature = `${Math.round(rollDeg)}:${Math.round(pitchDeg)}:${Math.round(yawDeg)}`;
+        if (canvasDirty || instrumentSignature !== lastInstrumentSignature) {
+          drawHorizon(rollDeg, pitchDeg);
+          drawCompass(yawDeg);
+          lastInstrumentSignature = instrumentSignature;
+        }
+        if (canvasDirty || nowMs - lastTraceDrawMs > tracePeriodMs) {
+          drawTrace();
+          lastTraceDrawMs = nowMs;
+        }
+        canvasDirty = false;
 
         setGate('gateLink', !!t.connected);
         setGate('gateArmed', !!t.armed);
         setGate('gateOffboard', !!s.offboard_enabled);
         setGate('gateAuto', !!s.autonomy_enabled);
-        setGate('gateTarget', !!s.target.target_visible, 'LOCKED', 'LOST', true);
+        setGate('gateTarget', !!target.target_visible, 'LOCKED', 'LOST', true);
         setGate('gateGps', !!t.health_gps_ok, 'OK', 'NO', true);
         setGate('gateCommand', !!c.executed, 'SENT', c.command_type || 'IDLE', true);
         setGate('gateMavsdkReq', !!s.mavsdk_requested, 'ON', 'OFF');
         setText('gateMavsdk', s.mavsdk_status || 'UNKNOWN', statusClass(String(s.mavsdk_status).includes('SENT') || String(s.mavsdk_status).includes('OK') || String(s.mavsdk_status).includes('READY'), true));
-        const allGo = !!t.connected && !!t.armed && !!s.offboard_enabled && !!s.autonomy_enabled && !!s.target.target_visible;
+        const allGo = !!t.connected && !!t.armed && !!s.offboard_enabled && !!s.autonomy_enabled && !!target.target_visible;
         setText('gateSummary', allGo ? 'GREEN' : 'BLOCKED', statusClass(allGo, true));
 
         setText('commandMain', c.executed ? 'SENT' : c.command_type || 'IDLE', statusClass(c.executed, true));
         setText('commandDetail', `status=${c.status || '--'} · yaw=${fmt(Number(c.yaw_rate_rad_s), 3)} rad/s · fwd=${fmt(Number(c.forward_m_s), 3)} m/s`);
         updateBars(c);
 
-        const nowMs = performance.now();
-        if (nowMs - lastRawUpdateMs > 2500) {
-          document.getElementById('raw').textContent = JSON.stringify(s, null, 2);
+        if (node('rawPanel').open && nowMs - lastRawUpdateMs > rawUpdatePeriodMs) {
+          setText('raw', JSON.stringify(s));
           lastRawUpdateMs = nowMs;
         }
       } catch (e) {
         setText('mission', 'DASHBOARD ERROR', 'bad');
         setText('missionReason', String(e));
+      } finally {
+        refreshInFlight = false;
       }
     }
 
-    window.addEventListener('resize', () => { drawTrace(); drawHorizon(0,0); drawCompass(0); });
+    window.addEventListener('resize', () => { canvasDirty = true; });
     setInterval(refresh, refreshPeriodMs);
     refresh();
   </script>
@@ -875,20 +909,31 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/status":
             snapshot_fn: Callable[[], dict[str, Any]] = self.server.snapshot_fn  # type: ignore[attr-defined]
-            body = json.dumps(snapshot_fn(), sort_keys=True).encode("utf-8")
+            body = json.dumps(snapshot_fn()).encode("utf-8")
             self._send(200, body, "application/json")
             return
         self._send(404, b"not found", "text/plain")
 
+    @staticmethod
+    def _payload_bool(payload: dict[str, Any], field: str, default: bool = False) -> bool:
+        value = payload.get(field, default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        return bool(value)
+
     def do_POST(self) -> None:  # noqa: N802 - http.server API name
-        request_attr = {
-            "/api/autonomy_request": "request_autonomy_fn",
-            "/api/mavsdk_request": "request_mavsdk_fn",
-            "/api/mission_request": "request_mission_fn",
-            "/api/abort_hold": "request_abort_hold_fn",
-            "/api/land": "request_land_fn",
+        request_spec = {
+            "/api/autonomy_request": ("request_autonomy_fn", "enabled"),
+            "/api/mavsdk_request": ("request_mavsdk_fn", "enabled"),
+            "/api/mission_request": ("request_mission_fn", "enabled"),
+            "/api/abort_hold": ("request_abort_hold_fn", "confirm"),
+            "/api/land": ("request_land_fn", "confirm"),
         }.get(self.path)
-        if request_attr is None:
+        if request_spec is None:
             self._send(404, b"not found", "text/plain")
             return
 
@@ -896,14 +941,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
         raw = self.rfile.read(min(length, 1024)) if length > 0 else b"{}"
         try:
             payload = json.loads(raw.decode("utf-8") or "{}")
-            enabled = bool(payload.get("enabled", False))
         except Exception:
             self._send(400, b"invalid json", "text/plain")
             return
 
+        request_attr, bool_field = request_spec
+        value = self._payload_bool(payload, bool_field, False)
+
+        if bool_field == "confirm" and not value:
+            body = json.dumps({"ok": False, "error": "confirm true required"}).encode("utf-8")
+            self._send(400, body, "application/json")
+            return
+
         request_fn: Callable[[bool], None] = getattr(self.server, request_attr)  # type: ignore[attr-defined]
-        request_fn(enabled)
-        self._send(200, json.dumps({"ok": True, "enabled": enabled}).encode("utf-8"), "application/json")
+        request_fn(value)
+
+        response_field = "confirmed" if bool_field == "confirm" else "enabled"
+        self._send(200, json.dumps({"ok": True, response_field: value}).encode("utf-8"), "application/json")
 
     def log_message(self, fmt: str, *args: Any) -> None:
         # Keep normal HTTP polling from spamming ROS logs.
@@ -1079,7 +1133,7 @@ class DashboardNode(Node):
     def get_snapshot(self) -> dict[str, Any]:
         now = time.time()
         with self._lock:
-            snapshot = json.loads(json.dumps(self._snapshot))
+            snapshot = copy.deepcopy(self._snapshot)
 
         snapshot["uptime_s"] = round(now - self._started_at, 1)
         timestamps = snapshot.pop("_timestamps", {})
@@ -1270,14 +1324,22 @@ class DashboardNode(Node):
         self.diagnostics.mark_published(self.mavsdk_action_topic, summary=f"id={msg.command_id}, action={action}, note={note}")
         self.get_logger().warning(f"Dashboard MAVSDK action request: {action} | {note}")
 
-    def publish_abort_hold(self, enabled: bool = True) -> None:
+    def publish_abort_hold(self, confirmed: bool = False) -> None:
+        if not confirmed:
+            self.get_logger().warning("Dashboard Abort/Hold ignored because confirm=true was not provided.")
+            return
+
         # Abort should stop our mission/offboard requests first, then ask PX4 to hold if actions are enabled.
         self.publish_mission_request(False)
         self.publish_mavsdk_request(False)
         self.publish_autonomy_request(False)
         self._publish_action_request("HOLD", "dashboard Abort/Hold")
 
-    def publish_land(self, enabled: bool = True) -> None:
+    def publish_land(self, confirmed: bool = False) -> None:
+        if not confirmed:
+            self.get_logger().warning("Dashboard Land ignored because confirm=true was not provided.")
+            return
+
         # Land is intentionally separate from Abort/Hold. telemetry_node still enforces allow_mavsdk_actions.
         self.publish_mission_request(False)
         self.publish_mavsdk_request(False)
